@@ -1,4 +1,4 @@
-# Branch protection for `v2-rust` (M0-2)
+# Branch protection for `v2-rust` (M0-2), and for `main` at cutover (issue #161)
 
 Issue #2 asks for these settings on `v2-rust`. **Not yet applied** -- this
 document is the spec for someone with repo admin rights to apply by hand
@@ -6,6 +6,20 @@ document is the spec for someone with repo admin rights to apply by hand
 code can safely do to itself). As of this writing `v2-rust` has **no**
 branch protection at all (`gh api repos/<org>/agent-wkp/branches/v2-rust/protection`
 returns 404).
+
+**`main`, by contrast, already has protection configured today** -- but
+against the old Python CI: a required `test (3.12)` status check (from
+`.github/workflows/ci.yml`, only present on `main`) plus one approving
+review, with `enforce_admins: false` (an owner can bypass the required
+check; this is how PR #104 landed directly on `main` by accident on
+2026-09-09 before being reverted the same day). Per ADR-0013, the
+`v2-rust` -> `main` cutover (issue #161) does not happen until M6's exit
+criterion holds, but when it does, **this same required-checks list below
+must be applied to `main` *before* the content swap**, replacing the
+`test (3.12)` check -- otherwise the swap PR itself can never satisfy a
+required check that has nothing left to produce it (no `ci.yml` on the
+incoming tree). Everything below is written as the target state for
+whichever branch is the live one at the time it's applied.
 
 ## Required status checks
 
@@ -46,8 +60,11 @@ by convention alone.
 ## Other settings
 
 - "Do not allow bypassing the above settings" for admins, per CLAUDE.md's
-  own stance against `--admin`-style bypasses.
-- Disallow force pushes and branch deletion on `v2-rust`.
+  own stance against `--admin`-style bypasses. (`main`'s current
+  `enforce_admins: false` predates this document and should be flipped to
+  `true` at the same time the required-checks list below is applied to it.)
+- Disallow force pushes and branch deletion on `v2-rust` (already the case
+  on `main` today: `allow_force_pushes`/`allow_deletions` both `false`).
 
 ## Why this isn't applied yet
 

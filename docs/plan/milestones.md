@@ -2,6 +2,8 @@
 
 Each milestone has an exit criterion that is observable, not a checklist of files. A milestone is done when its exit criterion holds on `main` with CI green. Issues carry the `M<n>` label. Order is strict: M1 replaces the Python tool for daily use before any sync or hub work starts, so every later milestone is dogfooded on a real store.
 
+**On "holds on `main`":** `main` is deliberately frozen `v0-python` history (tagged `v0-python`, M0 task 4); every milestone since M0 has actually held on `v2-rust` instead, annotated as such below. ADR-0013 decided this is intentional, not drift: the `v2-rust` -> `main` cutover is itself an M6 task (issue #161), gated on M6's own exit criterion, not done ahead of it.
+
 | Milestone | Theme | Exit criterion |
 |---|---|---|
 | M0 | Foundations | `wkp --version` builds as a static binary on macOS arm64 and Linux x86_64 from a clean checkout; CI runs fmt, clippy, test, audit, deny, bench; binary under 10 MB; minimum git version decided and enforced at runtime |
@@ -113,5 +115,11 @@ M4's exit criterion holds on `v2-rust` as of all six tasks above merging (issues
 ## Out of scope for M5 (deferred, not forgotten)
 
 Billing/Merchant-of-Record integration (design 8.2), the account/billing web application (design 3.3's separate, not-yet-existing repo), real hosted Postgres provisioning (a Supabase or RDS account, actual credentials), and production deployment (DNS, real TLS certificates, the actual container registry/host). All later, separate work once this milestone's CI-testable exit criterion holds -- not something any task above needs to resolve.
+
+## M6 tasks
+
+M5's exit criterion holds (line 109 above), so M6 is breakable into tasks. Only one is scoped so far; the rest of M6 (Landlock/seccomp, cosign-signed releases with SLSA/SBOM, Homebrew tap, OCI image, Scorecard gate, self-update signature verification) is not yet broken down.
+
+1. **(ADR-0013) Migrate `v2-rust` into `main` and retire `v2-rust`**: gated on the rest of M6's exit criterion holding first, not a prerequisite to it. Update `main`'s branch protection (currently requires the old Python CI's `test (3.12)` check, which can never post once `main`'s tree changes) to the Rust CI job list *before* the content swap; reconcile the two no-op commits already on `main` (a same-day accidental-merge-then-revert of PR #104, verified empty diff); merge `v2-rust`'s tree into `main` via a normal protected-branch PR; retire `v2-rust` afterward. Issue #161.
 
 Later milestones are broken into tasks when the previous milestone's exit criterion holds.
