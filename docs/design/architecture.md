@@ -21,12 +21,12 @@ migration").
 
 ```mermaid
 flowchart LR
-    subgraph one machine, either mode
-        cli["wkp CLI"] -->|read/write| store["git repo:\nmarkdown + OKF frontmatter"]
-        cli -->|wkp index| idx[("index.db\nSQLite FTS5")]
-        store -->|derives| idx
-        cli <-->|clean/smudge filter| crypto["wkp-crypto:\nage encrypt/decrypt\nvisibility: private only"]
-        cli -->|signed commits| keys["OS keystore:\nsigning key (SSH)\nencryption identity (age X25519)"]
+    subgraph one_mode["one machine, either mode"]
+        cli["wkp CLI"] -->|"read/write"| store["git repo:<br/>markdown + OKF frontmatter"]
+        cli -->|"wkp index"| idx[("index.db<br/>SQLite FTS5")]
+        store -->|"derives"| idx
+        cli <-->|"clean/smudge filter"| crypto["wkp-crypto:<br/>age encrypt/decrypt<br/>visibility: private only"]
+        cli -->|"signed commits"| keys["OS keystore:<br/>signing key (SSH)<br/>encryption identity (age X25519)"]
     end
 ```
 
@@ -40,8 +40,7 @@ whole system for a single-device user.
 
 ```mermaid
 flowchart TD
-    dev["developer's machine"]
-    subgraph dev
+    subgraph dev["developer's machine"]
         wkp["wkp CLI"]
         repo["store (git repo)"]
         db[("index.db")]
@@ -64,15 +63,15 @@ case (`git bundle` instead of a live remote).
 
 ```mermaid
 flowchart LR
-    subgraph laptop
+    subgraph laptop["laptop"]
         a["wkp CLI"] --> abranch["sync/laptop"]
     end
-    subgraph desktop
+    subgraph desktop["desktop"]
         b["wkp CLI"] --> bbranch["sync/desktop"]
     end
-    remote[("plain bare git repo\n(NAS / GitHub / anywhere)")]
-    abranch <-->|wkp sync: fetch + merge driver\n+ modify/delete safe-mode| remote
-    bbranch <-->|wkp sync| remote
+    remote[("plain bare git repo<br/>(NAS / GitHub / anywhere)")]
+    abranch <-->|"wkp sync: fetch + merge driver<br/>+ modify/delete safe-mode"| remote
+    bbranch <-->|"wkp sync"| remote
 ```
 
 Merging itself uses `wkp merge-driver` (frontmatter-aware: union tags,
@@ -90,31 +89,31 @@ and revoke device access instead of trusting every device unconditionally.
 ```mermaid
 flowchart TB
     subgraph deviceA["device A"]
-        clia["wkp CLI\n+ mTLS device cert"]
+        clia["wkp CLI<br/>+ mTLS device cert"]
     end
     subgraph deviceB["device B"]
-        clib["wkp CLI\n+ mTLS device cert"]
+        clib["wkp CLI<br/>+ mTLS device cert"]
     end
 
-    fd["front door\n(wkp-hub serve)\nrustls TLS termination,\nclient-cert verification"]
-    cp[("control plane (Postgres)\ntenants / devices / device_grants\n+ connection_reset_events")]
-    reg["listen_for_revocations\n(Postgres LISTEN)"]
+    fd["front door<br/>(wkp-hub serve)<br/>rustls TLS termination,<br/>client-cert verification"]
+    cp[("control plane (Postgres)<br/>tenants / devices / device_grants<br/>+ connection_reset_events")]
+    reg["listen_for_revocations<br/>(Postgres LISTEN)"]
 
-    clia -- "HTTPS + mTLS\n(git smart-HTTP)" --> fd
+    clia -- "HTTPS + mTLS (git smart-HTTP)" --> fd
     clib -- "HTTPS + mTLS" --> fd
-    fd <-->|verify cert chain + revoked_at| cp
-    fd <-->|force-close on NOTIFY| reg
-    reg -.->|LISTEN wkp_hub_connection_reset| cp
+    fd <-->|"verify cert chain and revoked_at"| cp
+    fd <-->|"force-close on NOTIFY"| reg
+    reg -.->|"LISTEN wkp_hub_connection_reset"| cp
 
-    fd -->|proxy: same git smart-HTTP,\nnetwork call, not a local exec| podA
-    fd -->|proxy| podB
+    fd -->|"proxy: same git smart-HTTP, network call, not a local exec"| podA
+    fd -->|"proxy"| podB
 
     subgraph podA["tenant A's pod (on-demand)"]
         hubA["wkp-hub serve-tenant"]
-        repoA["bare repo (bind-mounted,\noutside the pod's own fs)"]
+        repoA["bare repo (bind-mounted,<br/>outside the pod's own fs)"]
         idxA[("index.db")]
         hubA --> repoA
-        hubA -->|post-receive: index\nshared content only| idxA
+        hubA -->|"post-receive: index shared content only"| idxA
     end
     subgraph podB["tenant B's pod (on-demand)"]
         hubB["wkp-hub serve-tenant"]
@@ -124,7 +123,7 @@ flowchart TB
         hubB --> idxB
     end
 
-    fd -->|start/stop on demand,\nidle-teardown reaper| orch["PodOrchestrator\n(PodmanOrchestrator today;\nKubernetes reserved, #141)"]
+    fd -->|"start/stop on demand, idle-teardown reaper"| orch["PodOrchestrator<br/>(PodmanOrchestrator today;<br/>Kubernetes reserved, issue 141)"]
     orch --> podA
     orch --> podB
 ```
