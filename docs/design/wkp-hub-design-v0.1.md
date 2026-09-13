@@ -9,6 +9,7 @@
 
 ## Changelog
 
+- 2026-09-13: Full-document accuracy audit (four parallel passes covering every section) found real drift beyond the 8.1/8.2 annotations already in place: a stale two-transport/shared-repo diagram (3.1), an out-of-date repo-structure listing (`wkp-shell`, a nonexistent `adapters/` directory, removed `sshd_config`, 3.3), an inaccurate macOS peer-credential claim (4.2, corrected per ADR-0004), a `wkp gc` command that was never built (5.1), a nonexistent `wkp verify` subcommand described in place of what `wkp index` actually does (7.3), an overstated per-project instruction-scoping precision (7.4, now open question 11.7), `wkp forget`'s two-operation split (ADR-0007) never reflected here (7.6), a hub-hardening table (8.3) still describing the pre-ADR-0009/0011 world including a claimed no-network sandboxed indexing worker that was never built (**tracked as issue #159**, not just a doc fix), and section 9's entire CI/pipeline description significantly overstating what's actually running (branch protection, Scorecard gating, Trivy/Grype/SBOM/CodeQL-as-analyzer/cargo miri, most named fuzz targets, the SSH-era integration test). All annotated in place per this doc's own convention (`[status], not just stale prose` rather than silent deletion); nothing here is a new decision, only a correction of what's already decided or already built.
 - 2026-09-11: pluggable pod orchestrator: `crates/wkp-hub/src/tenant_pod.rs`
   gains a `PodOrchestrator` trait (`PodmanOrchestrator` the only
   implementation today; `WKP_HUB_POD_ORCHESTRATOR=kubernetes` a reserved
@@ -122,6 +123,8 @@ The last row is the strategic bet **[judgment]**: for a micro-SaaS aimed at tech
 
 ### 3.1 Components
 
+**Updated 2026-09-13 for ADR-0009/0010/0011/0012** -- the diagram below reflects the actual current transport (HTTPS + mutual TLS only, SSH dropped) and isolation model (a container-runtime pod per tenant, not a shared repo under one process). See `docs/design/architecture.md` for a fuller diagrammed walkthrough of both local and hub mode, including a register/push/revoke sequence.
+
 ```
 ┌──────────────────────────────── laptop / workstation ────────────────────────────────┐
 │                                                                                       │
@@ -131,20 +134,22 @@ The last row is the strategic bet **[judgment]**: for a micro-SaaS aimed at tech
 │  ┌───────────────────────────── wkp (single static binary) ─────────────────────┐    │
 │  │  read path:  index.db (SQLite FTS5, BM25)  → tier0.md / search results        │    │
 │  │  write path: markdown files → git plumbing (hash-object, commit-tree, sign)   │    │
-│  │  sync path:  git fetch/push over SSH or HTTPS, or git bundle (air-gapped)     │    │
+│  │  sync path:  git fetch/push over a plain remote, or git bundle (air-gapped)   │    │
 │  │  optional wkpd: file watcher, sync scheduler, Unix-socket server for harnesses│    │
 │  └───────────────────────────────────────────────────────────────────────────────┘    │
 │        │                                                                              │
 │  ~/.wkp/store/  (git repo: knowledge + memory, age-encrypted where private)           │
 │  ~/.wkp/index/  (derived SQLite, never synced)                                        │
 └───────────────────────────────────────┬───────────────────────────────────────────────┘
-                                        │ SSH (ed25519 device key) or HTTPS smart protocol
+                                        │ mTLS device certificate (hub's own CA) over HTTPS
                                         ▼
-┌──────────────────────────────── hosted hub ───────────────────────────────────────────┐
-│  OpenSSH sshd (AuthorizedKeysCommand + ForceCommand) ── git-receive-pack / upload-pack│
-│  reverse proxy ── git http-backend (CGI shipped with git)                             │
-│  per-tenant bare repo ── post-receive → wkp index (per-tenant SQLite) [opt-in tier]   │
-│  control plane: accounts, devices, keys, subscriptions (Postgres) ── MoR for billing  │
+┌──────────────────────────────── hosted hub (wkp-hub) ─────────────────────────────────┐
+│  front door (`wkp-hub serve`): rustls TLS termination + client-cert verification,     │
+│    RFC 8628 device grant + CSR signing, no bearer tokens                              │
+│  ── proxies git smart-HTTP to whichever tenant pod a request names ──                 │
+│  tenant's own pod (on demand, `PodOrchestrator`: podman today, Kubernetes reserved):   │
+│    `wkp-hub serve-tenant` ── git http-backend ── post-receive → index.db (shared only) │
+│  control plane (Postgres): tenants, devices, device_grants, connection_reset_events    │
 └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -158,8 +163,8 @@ The last row is the strategic bet **[judgment]**: for a micro-SaaS aimed at tech
 | D4 | Index is a derived, never-synced SQLite file; BM25 via FTS5 is the default retrieval | 5.2, 5.3 |
 | D5 | Sync is git transport; conflicts resolved by structure (one subject per file) plus a custom merge driver | 6 |
 | D6 | Private content is encrypted client-side (age) before it enters git; hosted default is zero-knowledge | 7.2 |
-| D7 | Hosted git front end is OpenSSH + git's own server binaries, not a custom protocol server | 8.1 |
-| D8 | Per-tenant SQLite indexes on the hub, Postgres only for the control plane | 8.2 |
+| D7 | Hosted git front end is OpenSSH + git's own server binaries, not a custom protocol server | 8.1 -- **superseded (ADR-0011): HTTPS + mutual TLS only, SSH dropped** |
+| D8 | Per-tenant SQLite indexes on the hub, Postgres only for the control plane | 8.2 -- **isolation mechanism superseded (ADR-0009/0010/0012): a container-runtime pod per tenant, not a Unix-UID switch; Postgres-for-control-plane half unaffected** |
 | D9 | Memory written by agents is provenance-tagged and never enters Tier 0 without a human-signed commit | 7.4 |
 | D10 | Pipeline treats agentic maintainers as untrusted contributors with strong, automated gates | 9 |
 
@@ -174,17 +179,16 @@ agent-wkp/                       (Cargo workspace)
     wkp-crypto/    age filter, key handling, signing, allowed_signers   (CODEOWNERS: human)
     wkp-git/       plumbing wrapper, bundles, sync                       (CODEOWNERS: human)
     wkp-cli/       the `wkp` binary (`wkpd` is a subcommand)
-    wkp-hub/       `wkp hub` mode: wkp-shell, key-to-tenant, post-receive indexer, control plane
+    wkp-hub/       `wkp-hub` mode: mTLS front door, tenant pods, post-receive indexer, control plane
     wkp-sys/       the only crate allowed `unsafe` (SQLite bundling)
-  adapters/        hook templates per harness, printed by `wkp hooks`
-  deploy/          Containerfiles, sshd_config, systemd/launchd units, compose for the hub
+  deploy/          Containerfiles (CLI scratch image; wkp-hub's front door image), systemd/launchd units
   fuzz/            cargo-fuzz targets
   tests/injection-corpus/
   docs/            this design doc, ADRs
   .github/workflows/
 ```
 
-`wkp-hub` is a separate binary target with its own container image, so the laptop binary never links the Postgres client or control-plane code; feature flags and separate `[[bin]]` targets keep the size budget in 9.6 intact. `wkp hooks --framework <name>` is the only "installer": it prints the exact hook text for an agent or a human to apply, and the binary never writes outside its own store.
+`wkp-hub` is a separate binary target with its own container image, so the laptop binary never links the Postgres client or control-plane code; feature flags and separate `[[bin]]` targets keep the size budget in 9.6 intact. `wkp hooks --framework <name>` is the only "installer": it prints the exact hook text for an agent or a human to apply directly to stdout (no separate `adapters/` template directory -- the text lives inline in `crates/wkp-cli`'s own source), and the binary never writes outside its own store.
 
 Two repos live outside the workspace by convention: `homebrew-wkp` (Homebrew requires a tap in its own `homebrew-<tap>` repo; the release workflow updates the formula with a scoped token) and, if and when it exists, the account and billing web surface (different language, toolchain, scanner set, deploy target and blast radius; 8.2 already walls it off from tenant content). A separate repo for the hub "for security" is deliberately rejected: the secrets that matter live in CI environments and CODEOWNERS-gated workflows, not in repo boundaries.
 
@@ -212,7 +216,7 @@ Two repos live outside the workspace by convention: `homebrew-wkp` (Homebrew req
 
 ### 4.2 D2: No mandatory daemon; optional `wkpd` over a Unix domain socket
 
-**Decision.** `wkp search`, `wkp context`, `wkp remember` and `wkp materialize` work as standalone subprocesses with no background process. An optional `wkpd` provides file watching (re-index on change), scheduled sync, and a local API for harnesses that prefer a socket to spawning a process. `wkpd` listens **only** on a Unix domain socket with mode `0600`, verifies the peer's UID (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`/`getpeereid` on macOS), and never binds a TCP port.
+**Decision.** `wkp search`, `wkp context`, `wkp remember` and `wkp materialize` work as standalone subprocesses with no background process. An optional `wkpd` provides file watching (re-index on change), scheduled sync, and a local API for harnesses that prefer a socket to spawning a process. `wkpd` listens **only** on a Unix domain socket with mode `0600`, verifies the peer's UID via `SO_PEERCRED` on Linux, and never binds a TCP port. **Resolved (ADR-0004, 2026-09-08): macOS support was never implemented** -- `rustix`, the crate this uses, has no macOS peer-credential API today (an upstream gap, not a choice made here) -- so `wkpd` refuses to start at all on non-Linux targets rather than binding an unverified socket; `LOCAL_PEERCRED`/`getpeereid` were the originally planned mechanism, not what shipped.
 
 **Reasoning.**
 
@@ -234,9 +238,10 @@ Two repos live outside the workspace by convention: `homebrew-wkp` (Homebrew req
 | Incremental index check (`wkp index`) | < 30 ms / 100 ms | `git hash-object` stat-cache compare, changed files only |
 | `wkp search` cold process | < 10 ms / 25 ms | Binary start + FTS5 query on ≤ 50k items |
 | `wkp remember` (write + commit) | < 50 ms / 150 ms | Plumbing commit, no hooks in the hot path |
+| `wkp materialize --tier 0\|1` | < 30 ms / 100 ms | Assembles `tier{N}.md` from the index; same order of magnitude as the incremental-index target |
 | Peak RSS for `wkp search` | < 30 MB | Excludes optional embedding client |
 
-These are engineering targets, not measurements **[unverified]**. They should be enforced by a benchmark gate in CI (section 9.5) so regressions are caught by the pipeline rather than by users.
+**Partially measured, not just engineering targets** (`benches/README.md`, `benches/baseline.json`, CI's `bench` job): cold `wkp search` on a 50k-item corpus meets its target comfortably (~260µs in-process, ~2-3ms including real process-spawn overhead measured separately); peak RSS was separately confirmed around 5.7MB on a small store, within budget. Incremental index **misses its target by roughly an order of magnitude** (~400-500ms measured, not 30ms) because the current implementation copies the whole `index.db` via `VACUUM INTO` regardless of change count -- a real, tracked, still-open design-vs-reality conflict (`docs/adr/0002-incremental-index-write-mechanism.md`, issue #29), not a regression. `wkp remember`'s own row has no benchmark yet and remains an engineering target only.
 
 ---
 
@@ -261,7 +266,7 @@ These are engineering targets, not measurements **[unverified]**. They should be
 
 **Git settings applied by `wkp init`.** `protocol.version=2` (no full ref advertisement on fetch, [git protocol v2](https://git-scm.com/docs/protocol-v2)), `git maintenance start` with `commit-graph` enabled so `git log` on the audit path stays fast on long histories ([git-maintenance](https://git-scm.com/docs/git-maintenance)), `receive.fsckObjects` and `transfer.fsckObjects` on, `core.untrackedCache=true`.
 
-**Accepted failure modes.** Git is poor at very large binary blobs; WKP stores markdown only and rejects attachments above a configurable size. Git history grows monotonically; `wkp gc` wraps `git gc` and, for privacy deletion, a documented history-rewrite procedure (section 7.6).
+**Accepted failure modes.** Git is poor at very large binary blobs; WKP stores markdown only and rejects attachments above a configurable size. Git history grows monotonically; a `wkp gc` wrapper around `git gc` is not yet implemented (no such subcommand exists today), and for privacy deletion there is a documented history-rewrite procedure (`wkp purge`, section 7.6, ADR-0008) that already ships.
 
 ### 5.2 D4a: The index is derived, local, and never synced
 
@@ -405,17 +410,21 @@ Prompt injection through agent-consumed content is **established** as a practica
 ### 7.3 Identity and signing
 
 - Every writer (the human, each harness/agent identity) has an `ed25519` key. Humans use their existing SSH key; agent identities get keys generated per harness with names like `agent/claude-code@host`. Agent keys are stored in the keystore with an ACL that permits `wkp` to use them without exposing the private key to the harness process itself (macOS Keychain ACLs; Linux via `ssh-agent` confirmation or a dedicated agent socket).
-- Commits are SSH-signed; `wkp verify` checks every commit on fetch against an `allowed_signers` file that the store carries ([git ssh signing, allowedSignersFile](https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile)). Unsigned or unknown-signer commits are accepted into history but their content is treated as `confidence: proposed` and excluded from Tier 0 and Tier 1.
+- Commits are SSH-signed, checked against an `allowed_signers` file that the store carries ([git ssh signing, allowedSignersFile](https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile)). **There is no separate `wkp verify` subcommand or fetch-time check** -- verification is folded directly into `wkp index`, which resolves each changed path's most recent signer (`wkp_git::allowed_signers::last_signer_for_path`) and records it per item as `human_signed`, the single boolean `compute_tier` (7.4) actually gates on. Unsigned or unknown-signer commits are accepted into history but their content's `human_signed` is `false`, forcing tier 2 regardless of `type`/`confidence`. M3-7 adds purely human-facing visibility on top of this (reporting which newly-synced commits are unsigned or unknown after a fetch) -- it does not add a second gating mechanism.
 
 ### 7.4 D9: Provenance-gated injection (the prompt-injection control)
 
-**Decision.** Tier 0 and Tier 1 (content injected at session start without a search) are assembled only from items whose latest commit is signed by a key marked `role: human` in `allowed_signers`, **and** whose `type` is not `instruction` unless the same condition holds and the file is under `user/` or `projects/<current>/`. Everything written by an agent lands in `inbox/` with `confidence: inferred|proposed`, is Tier 2 only (reachable by explicit `wkp search`), and is rendered inside a clearly delimited, provenance-labeled block (`<wkp-item provenance="agent:opencode" confidence="proposed">`). `wkp promote <path>` moves an inbox item into the durable tree with a human-signed commit.
+**Decision.** Tier 0 and Tier 1 (content injected at session start without a search) are assembled only from items whose latest commit is signed by a key marked `role: human` in `allowed_signers`, **and** whose `type` is not `instruction` unless the same condition holds and the file is under `user/` or anywhere under a `projects/<name>/` directory. Everything written by an agent lands in `inbox/` with `confidence: inferred|proposed`, is Tier 2 only (reachable by explicit `wkp search`), and is rendered inside a clearly delimited, provenance-labeled block (`<wkp-item provenance="agent:opencode" confidence="proposed">`). `wkp promote <path>` moves an inbox item into the durable tree with a human-signed commit.
+
+**Known simplification, not yet revisited.** "`projects/<name>/`" above is genuinely *any* project directory, not scoped to whichever project the current session is in -- `compute_tier` has no notion of "current project" at index-build time (its own doc comment names this explicitly). In practice this means an `instruction`-type item scoped to project A can load into a session running in project B. Tracked as open question 11.7.
 
 **Reasoning.** This makes the memory layer a one-way valve for instruction-like content: agents can propose, only a human-signed commit can make something load unconditionally into another agent's context. It does not eliminate prompt injection (a human can promote a poisoned item, and Tier 2 results are still model input), but it removes the automatic, silent path from "content written by harness A" to "system-level context in harness B". Structural delimiting and provenance labels are the mitigations the injection literature and vendor guidance converge on; they are **practice**, not proof.
 
 **Accepted failure mode.** Friction: a user who wants agents to self-improve their durable memory without review must opt into a policy (`promote: auto` for a specific harness key). The default is deliberately the safe one.
 
 ### 7.5 Process hardening for the local binary
+
+**Not yet built (M6, not started per `docs/plan/milestones.md`).** Everything below is this milestone's target, stated as a decision for when M6 lands, not a description of the binary as it ships today -- there is no Landlock, seccomp, or `sandbox-exec` usage anywhere in the current codebase.
 
 - `wkp` drops capabilities it does not need: on Linux, a [Landlock](https://docs.kernel.org/userspace-api/landlock.html) ruleset restricting filesystem access to the store, the index and git's object directory, plus `seccomp` filtering of the syscall set (practice on modern kernels); on macOS, `sandbox-exec` profiles are deprecated but still functional for CLI tools and are used where available, with the hardened-runtime entitlements applied to the signed binary **[unverified for the specific macOS version in use; validate at build time]**.
 - Secrets never touch argv or environment: keys are read from the keystore or a `0600` file, and hub tokens are passed over stdin.
@@ -425,7 +434,7 @@ Prompt injection through agent-consumed content is **established** as a practica
 ### 7.6 Secrets in memory, deletion and privacy
 
 - **Write-path secret detection.** `wkp remember` and the pre-commit path run [gitleaks](https://github.com/gitleaks/gitleaks) rules (bundled as data, evaluated in-process) and refuse to commit content that matches credential patterns, returning a redacted preview so the harness can retry. Reuses a widely deployed rule set rather than inventing one.
-- **Deletion.** `wkp forget <path>` removes the file and, for private items, rotates the age recipients so old ciphertext becomes unreadable to revoked devices. True erasure from history requires `wkp purge`, a wrapped, documented `git filter-repo` procedure followed by forced push and re-clone on every device; the hub honors a purge by deleting unreachable objects immediately and its backups on their retention schedule. This is stated plainly to users rather than hidden.
+- **Deletion.** **Resolved as two distinct operations (ADR-0007), not one:** `wkp forget <path>` removes a single item's current-tree presence; `wkp forget --device <id>` rotates the age recipients so old ciphertext becomes unreadable to a revoked device. They don't share an input (a file path vs. a device id) or a blast radius (one file vs. every private item), so one command call was never going to do both safely. True erasure from history requires `wkp purge` (ADR-0008), a wrapped, documented `git filter-repo` procedure followed by forced push and re-clone on every device; the hub honors a purge by deleting unreachable objects immediately and its backups on their retention schedule. This is stated plainly to users rather than hidden.
 - **Retention.** Index files and hub-side caches are derived and deleted with the tenant. Hub backups are encrypted with a service key and retained for a documented window.
 
 ---
@@ -459,14 +468,16 @@ Prompt injection through agent-consumed content is **established** as a practica
 
 ### 8.3 Hub hardening summary
 
+**Updated 2026-09-13 to describe what actually ships**, replacing the two-transport/shared-UID table 8.1/8.2's own "Superseded" annotations already flagged as out of date. Two rows below (Process, Observability) describe a real gap between this design and what's built, not just stale prose -- see issue #159 for the Process row.
+
 | Layer | Control |
 |---|---|
-| Network | Only 22 (sshd) and 443 (proxy) exposed; proxy terminates TLS 1.3, rate-limits, forwards to `http-backend` over a UDS |
-| Auth | Key-only SSH; device-scoped tokens for HTTPS; device revocation immediate |
-| Tenant | Own UID, own quota, own bare repo, own index; `receive.fsckObjects=true`, `transfer.fsckObjects=true` so malformed objects are rejected on push |
-| Process | Indexing worker is a separate sandboxed process (Landlock + seccomp) with no network |
-| Data | Ciphertext for private items; plaintext `shared` items only; backups encrypted |
-| Observability | Structured audit events (who pushed what ref when) to the control plane; no content logging |
+| Network | 443 only; `wkp-hub`'s own `rustls` terminates TLS + verifies the client certificate directly, no separate reverse proxy or UDS hop |
+| Auth | mTLS client certificates issued by the hub's own CA (RFC 8628 device grant + CSR signing, ADR-0011); revocation effective on the *next* connection and, via Postgres LISTEN/NOTIFY, against an already-open one too |
+| Tenant | Container-runtime pod per tenant (ADR-0009/0010, `PodOrchestrator`: podman today, Kubernetes reserved, ADR-0012) -- not a Unix-UID switch; own bare repo (bind-mounted outside the pod's own ephemeral filesystem) and own index; `receive.fsckObjects=true`/`transfer.fsckObjects=true` so malformed objects are rejected on push. Per-tenant resource/cgroup quotas are **not yet decided** (ADR-0010's own open item) |
+| Process | **Gap, tracked as issue #159.** A tenant's pod runs exactly one container (`wkp-hub serve-tenant`) handling both the network-facing `git http-backend` and the `post-receive` indexing step -- there is no separate, no-network, sandboxed indexing process today |
+| Data | Ciphertext for private items; plaintext `shared` items only. Backup encryption/retention is real hosted-deployment infrastructure this milestone's own scope defers (`docs/plan/milestones.md`'s "Out of scope for M5"), not yet built |
+| Observability | **Gap, not yet built.** No structured "who pushed what ref when" audit-event table exists; the only audit trail today is `connection_reset_events`, scoped narrowly to the reset-all admin action (M5-12) |
 
 ---
 
@@ -478,42 +489,48 @@ Agentic maintainers (Hermes Agent, OpenCode, dsh, Claude Code) get the same righ
 
 ### 9.2 Repository and branch controls
 
-- Branch protection with required status checks, linear history, signed commits required, and no force-push on `main`.
-- GitHub Actions pinned to full commit SHAs, `permissions:` set to least privilege per job, and no secrets exposed to workflows triggered from forks.
-- Agent runners execute inside ephemeral containers with no credentials beyond a short-lived, PR-scoped token; they never see release-signing keys.
-- [OpenSSF Scorecard](https://github.com/ossf/scorecard) run on every push with a minimum score gate; [Allstar](https://github.com/ossf/allstar) or equivalent policy enforcement for repo settings drift.
+**Partially built; the branch-protection bullet below is not yet applied.** `v2-rust` (where all work actually merges -- `main` is the frozen `v0-python` history) currently has **no branch protection configured at all**. `docs/plan/branch-protection.md` documents the intended required-checks list and CODEOWNERS-review setting; applying it is a real repo-settings change deliberately left for a human to do, not something CI or an agent should flip on silently (see that doc's own "why this isn't applied yet").
+
+- Branch protection with required status checks, linear history, signed commits required, and no force-push on `main` -- **target, not yet applied** (see above).
+- GitHub Actions pinned to full commit SHAs, `permissions:` set to least privilege per job, and no secrets exposed to workflows triggered from forks -- **built**, verified in `.github/workflows/rust-ci.yml`.
+- Agent runners execute inside ephemeral containers with no credentials beyond a short-lived, PR-scoped token; they never see release-signing keys -- this describes the GitHub Actions runner model generally, not a project-specific control.
+- [OpenSSF Scorecard](https://github.com/ossf/scorecard) runs on every push -- **built** (`.github/workflows/scorecard.yml`), but publishes results to the Security tab only; it is **informational, not a minimum-score gate** that fails anything. [Allstar](https://github.com/ossf/allstar) or equivalent policy enforcement is **not implemented**.
 
 ### 9.3 Dependency and supply-chain gates (CVE detection)
 
-| Gate | Tool | What it catches |
-|---|---|---|
-| Known-vulnerable crates | [cargo-audit](https://github.com/rustsec/rustsec) against the RustSec DB | CVEs and unmaintained advisories |
-| License, source, duplicate and ban policy | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | Disallowed licenses, unknown registries, banned crates, advisories |
-| Human/agent audit of dependency diffs | [cargo-vet](https://github.com/mozilla/cargo-vet) | New or updated crates must carry an audit record; imports Mozilla/Google audits |
-| Cross-ecosystem vulnerability match | [OSV-Scanner](https://github.com/google/osv-scanner) on the lockfile and SBOM | Vulnerabilities in transitive deps, including bundled SQLite |
-| Container image and OS package scan | [Trivy](https://github.com/aquasecurity/trivy) and [Grype](https://github.com/anchore/grype) | Image CVEs, misconfigurations, secrets in layers |
-| SBOM generation | [Syft](https://github.com/anchore/syft) producing CycloneDX and SPDX, attached to every release | Inventory for continuous rescans after release |
-| Continuous rescan | Scheduled job re-runs OSV/Grype against every supported release's SBOM | New CVEs in already-shipped versions; opens an issue automatically |
-| Lockfile integrity | `Cargo.lock` committed; `--locked` in CI; Renovate/Dependabot PRs with grouped, auto-tested updates | Silent dependency drift |
+**The first four rows below are built and running in CI today; the last three (Trivy/Grype, SBOM generation, continuous rescan) are not yet implemented** -- no container-image scanner, SBOM generator, or scheduled rescan job exists anywhere in `.github/workflows/` or `deploy/` as of this writing. Left in the table as real, not-yet-built targets rather than deleted.
 
-Bundling SQLite (5.3) means SQLite CVEs are our responsibility; the SBOM makes them visible to the rescan job, and the `bundled` crate version is pinned and updated through the same PR gate.
+| Gate | Tool | What it catches | Status |
+|---|---|---|---|
+| Known-vulnerable crates | [cargo-audit](https://github.com/rustsec/rustsec) against the RustSec DB | CVEs and unmaintained advisories | Built |
+| License, source, duplicate and ban policy | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | Disallowed licenses, unknown registries, banned crates, advisories | Built |
+| Human/agent audit of dependency diffs | [cargo-vet](https://github.com/mozilla/cargo-vet) | New or updated crates must carry an audit record; imports Mozilla/Google audits | Built |
+| Cross-ecosystem vulnerability match | [OSV-Scanner](https://github.com/google/osv-scanner) on the lockfile | Vulnerabilities in transitive deps, including bundled SQLite | Built |
+| Container image and OS package scan | [Trivy](https://github.com/aquasecurity/trivy) and [Grype](https://github.com/anchore/grype) | Image CVEs, misconfigurations, secrets in layers | Not started |
+| SBOM generation | [Syft](https://github.com/anchore/syft) producing CycloneDX and SPDX, attached to every release | Inventory for continuous rescans after release | Not started (M6) |
+| Continuous rescan | Scheduled job re-runs OSV/Grype against every supported release's SBOM | New CVEs in already-shipped versions; opens an issue automatically | Not started |
+| Lockfile integrity | `Cargo.lock` committed; `--locked` in CI; Dependabot PRs with grouped, auto-tested updates | Silent dependency drift | Built (`.github/dependabot.yml`) |
+
+Bundling SQLite (5.3) means SQLite CVEs are our responsibility; OSV-Scanner already covers this today via the lockfile. SBOM-based continuous rescanning is additional coverage for the *release artifact* specifically, not yet built.
 
 ### 9.4 Static and dynamic analysis (proactive vulnerability detection)
 
-- **Compiler and lints.** `#![forbid(unsafe_code)]` in every crate except an explicitly named `sys` crate; `clippy` with `pedantic` and the security-relevant lints as errors; `cargo miri` on any crate that does contain `unsafe`.
-- **SAST.** [Semgrep](https://github.com/semgrep/semgrep) with the Rust and secrets rulesets plus custom rules for this codebase (for example: any `Command::new` must go through the `git::Plumbing` wrapper; no `std::env::var` for secrets). [CodeQL](https://codeql.github.com/) for the Rust and the small TypeScript surface.
-- **Fuzzing.** [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for every parser that consumes untrusted input: frontmatter, FTS5 query construction, merge-driver input, age filter I/O, `wkp-shell` argument parsing, hub webhook payloads. Continuous fuzzing via [OSS-Fuzz](https://github.com/google/oss-fuzz) once the project is public.
+- **Compiler and lints.** `#![forbid(unsafe_code)]` in every crate except `wkp-sys` -- built, verified present in every other crate. `clippy` with the default lint set as errors (`-D warnings`) is built; `clippy::pedantic` runs too, but **as a separate, non-blocking advisory step**, not "as errors" -- combining both in one invocation was tried and found to deny (not just warn on) roughly 80 pre-existing violations across the workspace, a real cleanup pass this project hasn't taken on yet (issue #2). `cargo miri` is **not used anywhere** in this codebase or CI today.
+- **SAST.** [Semgrep](https://github.com/semgrep/semgrep) with the Rust and secrets rulesets (`p/rust` + `p/secrets`) is built and running in CI; the custom `Command::new`/`std::env::var`-for-secrets rules described here are **not implemented as Semgrep rules** -- CLAUDE.md states both as hard rules enforced by code review, not by an automated lint (`crates/wkp-cli/tests/architecture_lint.rs` exists but checks a different, narrower thing: that `current_exe()` self-invocation only happens through the sanctioned `resolve_wkp_exe()` path). [CodeQL](https://codeql.github.com/) is used only via `github/codeql-action/upload-sarif`, to publish OSV-Scanner's and Scorecard's own SARIF output to the Security tab -- **it does not run as its own static analyzer** here, and there is no TypeScript surface in this repo to analyze.
+- **Fuzzing.** [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) exists with exactly one real target today (`fuzz/fuzz_targets/frontmatter.rs`). The other named targets below are aspirational: FTS5 query construction, merge-driver input, age filter I/O, and hub webhook-payload fuzzing are not yet built; a `wkp-shell` argument-parsing target is no longer possible to build at all, since that code was removed (ADR-0011/#125). Continuous fuzzing via [OSS-Fuzz](https://github.com/google/oss-fuzz) is not set up.
 - **Secrets.** gitleaks in pre-commit and CI; the same rules the product uses at runtime (7.6), so the rule set is tested by its own pipeline.
 - **Property tests.** `proptest` for the merge driver (merge is commutative and idempotent on the structural fields) and for the tier assembler (never exceeds budget, never includes an item failing the provenance gate).
 - **Injection regression suite.** A corpus of known prompt-injection payloads is committed as memory files; a CI test asserts none of them can reach Tier 0 or Tier 1 output without a human-signed commit. This converts the product's central security claim into a test.
 
 ### 9.5 Performance and correctness gates
 
-- Criterion benchmarks for the operations in 4.3, with a regression threshold that fails the PR.
+- Criterion benchmarks for the operations in 4.3, with a regression threshold that fails the PR -- built (`benches/`, CI's `bench` job), see 4.3's own note on which targets are actually measured yet.
 - Golden tests for `tier0.md` output across harness adapters.
-- An integration test that spins up `sshd` + `wkp-shell` in a container and exercises register, push, revoke, push-must-fail.
+- **This test now runs over HTTPS with mutual TLS, not SSH.** The SSH-path version described here (`sshd` + `wkp-shell` in a container) was real, ran in CI, and was retired once ADR-0011 dropped the SSH transport (#125) -- replaced by `deploy/hub/test-mtls-integration.sh` (M5-13): register a device over RFC 8628 + CSR, push and fetch over HTTPS+mTLS, revoke it, attempt another push, confirm it fails at the TLS handshake itself. Same shape, different transport.
 
 ### 9.6 Release integrity
+
+**Not yet built (M6, not started per `docs/plan/milestones.md`).** No release workflow, signing, or SLSA provenance exists today; the release profile and size/startup budget below are the one part of this section already true, since they're part of `Cargo.toml` itself, not the release pipeline.
 
 - Reproducible builds (`cargo` with pinned toolchain via `rust-toolchain.toml`, `SOURCE_DATE_EPOCH`, `--locked`), verified by building twice on independent runners and comparing hashes.
 - Artifacts (binaries, container images, SBOMs) signed with [Sigstore cosign](https://github.com/sigstore/cosign) using keyless OIDC identities tied to the release workflow, with [SLSA](https://slsa.dev/) provenance attestations generated by the build (target SLSA Build L3 via the official generators). The `wkp` binary verifies its own update channel against these signatures before applying an update.
@@ -559,6 +576,7 @@ Memory writes from a harness use `wkp remember --actor agent:<harness> --session
 4. **Hub-indexed tier.** Whether the confidentiality downgrade is acceptable to enough users to justify building the KMS-backed indexing worker.
 5. **Merge-driver semantics for agent-written facts.** Whether "keep both with provenance markers" produces readable files in practice, or whether inbox-only writes make the driver rarely exercised.
 6. **Org scope.** Multi-user sharing introduces authorization inside a repo (who may read which path). Git has no per-path ACL; the options are one repo per scope, or encryption recipients per path. Deferred.
+7. **Per-project instruction scoping.** 7.4's tier-0 gate for `type: instruction` checks "anywhere under a `projects/<name>/` directory," not the *current* project specifically -- `compute_tier` has no notion of which project a session is running in at index-build time. Whether this precision gap matters in practice (an instruction scoped to project A loading into a session in project B) hasn't been observed or measured yet.
 
 ---
 
@@ -578,8 +596,9 @@ Memory writes from a harness use `wkp remember --actor agent:<harness> --session
 | Repo structure | Single Cargo workspace monorepo | Per-component repos | Shared security-critical crates; one CI verdict per PR |
 | Encryption | age via clean/smudge, zero-knowledge default | git-crypt, server-side keys | Equality leakage, no security cliff |
 | Injection control | Human-signed gate for Tier 0/1 | Trust all synced content | Cross-harness prompt injection |
-| Hub transport | OpenSSH + git-shell + http-backend | Forgejo, custom SSH server | Minimum custom network surface |
-| Hub tenancy | Per-tenant UID, repo, SQLite | Shared Postgres for content | Isolation by construction |
+| Hub transport | HTTPS + mutual TLS only (ADR-0011) | OpenSSH + git-shell + http-backend (original choice, later dropped), Forgejo, custom SSH server | Pod-per-tenant model left no local repo for an SSH-exec'd git process to target; bridging SSH to a pod's http-backend wasn't worth the new protocol surface |
+| Hub tenancy | Container-runtime pod per tenant, repo, SQLite (ADR-0009/0010) | Per-tenant Unix UID (never actually implemented), shared Postgres for content | Isolation by construction, portable to Kubernetes later without a rewrite |
+| Pod orchestrator | `PodOrchestrator` trait; `PodmanOrchestrator` today, Kubernetes reserved (ADR-0012) | A separate helper binary; out-of-process-only orchestration | One seam every call site depends on, no new process boundary, front door still owns on-demand cold-start policy |
 | Billing | Merchant of Record | Direct Stripe | Tax and compliance offload; no card data in core |
 | Distribution | GitHub Releases, Homebrew tap, OCI image | PyPI wheel, `curl \| sh` installer, OS repos | Single current user; optimize the binary, not the installer |
 | Pipeline | Automated gates + human co-sign on critical paths | Agent-only review | Evidence on AI-generated code security |
@@ -589,7 +608,8 @@ Memory writes from a harness use `wkp remember --actor agent:<harness> --session
 ## References (primary sources)
 
 - agent-wkp repository and README: https://github.com/williamcaban/agent-wkp
-- agent-wkp architecture: https://github.com/williamcaban/agent-wkp/blob/main/docs/architecture.md
+- agent-wkp architecture (v0, Python implementation, `main` branch): https://github.com/williamcaban/agent-wkp/blob/main/docs/architecture.md
+- This repo's own local-mode-vs-hub-mode architecture diagrams (v2, current): `docs/design/architecture.md`
 - Memory layers comparison: https://github.com/RyanAlberts/best-of-Agent-Harnesses/blob/main/comparisons/memory-layers.md
 - SQLite FTS5: https://www.sqlite.org/fts5.html
 - Git plumbing and porcelain: https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain
