@@ -64,29 +64,29 @@ CONTAINER_A="wkp-tenant-${TENANT_A}-serve"
 CONTAINER_B="wkp-tenant-${TENANT_B}-serve"
 
 log "positive control: each pod can see its own tenant's repo"
-if ! podman exec "$CONTAINER_A" test -d "/srv/wkp-hub/repos/${TENANT_A}.git"; then
+if ! podman exec "$CONTAINER_A" test -d "/srv/wkp-hub/repos/${TENANT_A}/repo.git"; then
     echo "FAIL: tenant A's own pod cannot see its own repo -- something is wrong with the mount itself, not isolation" >&2
     exit 1
 fi
-if ! podman exec "$CONTAINER_B" test -d "/srv/wkp-hub/repos/${TENANT_B}.git"; then
+if ! podman exec "$CONTAINER_B" test -d "/srv/wkp-hub/repos/${TENANT_B}/repo.git"; then
     echo "FAIL: tenant B's own pod cannot see its own repo -- something is wrong with the mount itself, not isolation" >&2
     exit 1
 fi
 log "PASS: both pods see their own repo"
 
-log "isolation check: tenant A's pod must not see tenant B's repo at all"
-if podman exec "$CONTAINER_A" test -e "/srv/wkp-hub/repos/${TENANT_B}.git"; then
-    echo "FAIL: tenant A's pod can see tenant B's repo path -- cross-tenant filesystem isolation is broken" >&2
+log "isolation check: tenant A's pod must not see tenant B's storage directory at all"
+if podman exec "$CONTAINER_A" test -e "/srv/wkp-hub/repos/${TENANT_B}"; then
+    echo "FAIL: tenant A's pod can see tenant B's storage directory -- cross-tenant filesystem isolation is broken" >&2
     exit 1
 fi
-log "PASS: tenant B's repo does not exist inside tenant A's pod"
+log "PASS: tenant B's storage directory does not exist inside tenant A's pod"
 
-log "isolation check: tenant B's pod must not see tenant A's repo at all"
-if podman exec "$CONTAINER_B" test -e "/srv/wkp-hub/repos/${TENANT_A}.git"; then
-    echo "FAIL: tenant B's pod can see tenant A's repo path -- cross-tenant filesystem isolation is broken" >&2
+log "isolation check: tenant B's pod must not see tenant A's storage directory at all"
+if podman exec "$CONTAINER_B" test -e "/srv/wkp-hub/repos/${TENANT_A}"; then
+    echo "FAIL: tenant B's pod can see tenant A's storage directory -- cross-tenant filesystem isolation is broken" >&2
     exit 1
 fi
-log "PASS: tenant A's repo does not exist inside tenant B's pod"
+log "PASS: tenant A's storage directory does not exist inside tenant B's pod"
 
 log "isolation check: tenant A's pod's own serve-tenant mode refuses tenant B's git path over the network"
 # Real container-level confirmation of what

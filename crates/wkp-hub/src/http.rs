@@ -532,7 +532,15 @@ fn serve_git_http(
     remote_user: &str,
 ) -> Rendered {
     let content_type = request.header("Content-Type");
-    let path_info = format!("/{tenant_slug}.git/{suffix}");
+    // ADR-0014 (issue #165): on disk, a tenant's bare repo lives at
+    // `repos_root/<slug>/repo.git` -- `<slug>` its own directory, not
+    // baked into the repo's own name -- so `GIT_PROJECT_ROOT` is
+    // per-tenant here, and `PATH_INFO` no longer needs to repeat the
+    // slug. This is a server-side detail only: the wire-facing URL a
+    // git client actually uses (`<slug>.git`, parsed by
+    // `git_http_path` above) is unchanged.
+    let tenant_root = repos_root.join(tenant_slug);
+    let path_info = format!("/repo.git/{suffix}");
     let cgi_request = wkp_git::http_backend::CgiRequest {
         method: method_str,
         path_info: &path_info,
@@ -542,7 +550,7 @@ fn serve_git_http(
         body: request.body_bytes(),
     };
 
-    match wkp_git::http_backend::run_http_backend(repos_root, &cgi_request) {
+    match wkp_git::http_backend::run_http_backend(&tenant_root, &cgi_request) {
         Ok(response) => Rendered::cgi(response),
         Err(e) => {
             eprintln!("wkp-hub: git-http: http-backend failed: {e}");
@@ -1039,7 +1047,7 @@ mod tests {
             .expect("temp dir")
             .keep();
         let tenant_slug = unique_slug("single-tenant");
-        wkp_git::init_bare_repo(&repos_root.join(format!("{tenant_slug}.git")))
+        wkp_git::init_bare_repo(&repos_root.join(&tenant_slug).join("repo.git"))
             .expect("init_bare_repo");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
@@ -1109,7 +1117,7 @@ mod tests {
             .keep();
         let configured_slug = unique_slug("single-tenant-configured");
         let other_slug = unique_slug("single-tenant-other");
-        wkp_git::init_bare_repo(&repos_root.join(format!("{other_slug}.git")))
+        wkp_git::init_bare_repo(&repos_root.join(&other_slug).join("repo.git"))
             .expect("init_bare_repo");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");

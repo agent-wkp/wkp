@@ -81,11 +81,11 @@ fn index_worker_once_notices_a_real_push_and_indexes_only_the_shared_item() {
         String::from_utf8_lossy(&before.stderr)
     );
     assert!(
-        !repos_root.join("acme.index.db").exists(),
+        !repos_root.join("acme").join("index.db").exists(),
         "index-worker must not produce index.db before anything has been pushed"
     );
 
-    let repo_path = repos_root.join("acme.git");
+    let repo_path = repos_root.join("acme").join("repo.git");
     let clone_dir = repos_root.join("clone");
     run_git(
         repos_root,
@@ -123,7 +123,7 @@ fn index_worker_once_notices_a_real_push_and_indexes_only_the_shared_item() {
     // deliberately makes: indexing is now the index-worker's own job,
     // triggered by it noticing HEAD moved, not the push's.
     assert!(
-        !repos_root.join("acme.index.db").exists(),
+        !repos_root.join("acme").join("index.db").exists(),
         "a push alone must not produce index.db any more -- that's index-worker's job now, \
          not a post-receive hook's"
     );
@@ -135,7 +135,7 @@ fn index_worker_once_notices_a_real_push_and_indexes_only_the_shared_item() {
         String::from_utf8_lossy(&after.stderr)
     );
 
-    let index_path = repos_root.join("acme.index.db");
+    let index_path = repos_root.join("acme").join("index.db");
     assert!(
         index_path.exists(),
         "index-worker --once must have noticed the push and produced index.db, but {} does not exist",

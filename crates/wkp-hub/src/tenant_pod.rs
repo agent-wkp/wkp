@@ -4,11 +4,17 @@
 //! module's own, equally deliberate, subprocess boundary instead.
 //!
 //! A tenant's pod is one `podman pod` (named `wkp-tenant-<slug>`)
-//! holding **two containers**, both against the tenant's bare repo,
-//! bind-mounted in from the same fixed `repos_root/<slug>.git` path the
-//! front door's HTTPS path already uses (M5-3/M5-4) -- the pod's own
-//! container filesystem is otherwise ephemeral, so the repo has to
-//! live outside it:
+//! holding **two containers**, both with the tenant's *entire* storage
+//! directory (`repos_root/<slug>`, ADR-0014/issue #165 -- bare repo
+//! *and* `index.db`, not the bare repo alone) bind-mounted in at the
+//! same `/srv/wkp-hub/repos/<slug>` path the front door's HTTPS path
+//! already uses (M5-3/M5-4) -- the pod's own container filesystem is
+//! otherwise ephemeral, so this has to live outside it. Mounting the
+//! whole per-tenant directory rather than just the bare repo is what
+//! lets both containers see the same `index.db`, and keeps
+//! `index_tenant`'s temp-file-then-rename atomicity intact (temp file
+//! and rename target on the one filesystem this single mount
+//! provides, not split across a mount boundary):
 //!
 //! - The **serving** container (`wkp-hub serve-tenant --tenant <slug>`,
 //!   M5-7 PR 2/4): the only one reachable over the network, via the
@@ -199,10 +205,17 @@ fn ensure_seccomp_profile(repos_root: &Path) -> Result<std::path::PathBuf, Strin
 /// `deploy/hub/test-pod-lifecycle.sh`, the same documented split M5-5's
 /// container work already established between fast unit tests and one
 /// real end-to-end script).
+/// Binds a tenant's *entire* storage directory (ADR-0014, issue #165) --
+/// not just its bare repo -- so both this tenant's serving and indexing
+/// containers see the same `index.db`, not only the same repo. Mounting
+/// a whole per-tenant directory this way (rather than one mount for the
+/// repo and a second for the index file) also keeps `index_tenant`'s
+/// temp-file-then-rename atomicity intact: both the temp file and its
+/// rename target stay on the one filesystem this single mount provides.
 fn repo_mount_arg(repos_root: &Path, tenant_slug: &str) -> String {
     format!(
-        "{}:/srv/wkp-hub/repos/{tenant_slug}.git:Z",
-        repos_root.join(format!("{tenant_slug}.git")).display()
+        "{}:/srv/wkp-hub/repos/{tenant_slug}:Z",
+        repos_root.join(tenant_slug).display()
     )
 }
 
@@ -404,12 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn repo_mount_arg_binds_the_fixed_per_tenant_repo_path() {
+    fn repo_mount_arg_binds_the_whole_per_tenant_storage_directory() {
         let mount = repo_mount_arg(Path::new("/srv/wkp-hub/repos"), "acme");
-        assert_eq!(
-            mount,
-            "/srv/wkp-hub/repos/acme.git:/srv/wkp-hub/repos/acme.git:Z"
-        );
+        assert_eq!(mount, "/srv/wkp-hub/repos/acme:/srv/wkp-hub/repos/acme:Z");
     }
 
     #[test]

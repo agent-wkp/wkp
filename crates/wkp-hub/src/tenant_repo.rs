@@ -1,5 +1,6 @@
 //! Per-tenant bare repo provisioning and indexing (design 8.2, 8.3,
-//! M5-4; indexing's trigger mechanism rewritten by issue #159).
+//! M5-4; indexing's trigger mechanism rewritten by issue #159; on-disk
+//! layout rewritten by ADR-0014/issue #165).
 //!
 //! Three parts:
 //!
@@ -41,22 +42,40 @@
 
 use std::path::{Path, PathBuf};
 
+/// `repos_root/<slug>`'s own directory -- the one persistent storage
+/// location a tenant's entire pod (both the serving and indexing
+/// containers, `tenant_pod.rs`) gets mounted into as a whole (ADR-0014,
+/// issue #165): a bind mount of this host directory today (podman), a
+/// PersistentVolumeClaim mounted at the same container path once
+/// issue #141's Kubernetes backend exists. [`tenant_repo_path`] and
+/// [`tenant_index_path`] are the two fixed things that live inside it.
+fn tenant_storage_dir(repos_root: &Path, tenant_slug: &str) -> PathBuf {
+    repos_root.join(tenant_slug)
+}
+
 /// The one, fixed bare-repo path a tenant's git operations ever
 /// operate on -- never derived from anything a connecting client says.
 /// Originally `wkp_shell`'s own contract (M5-3, SSH `git-shell`
 /// invocations honored it too); moved here when #125 (ADR-0011)
 /// removed the SSH transport, since this module -- provisioning and
-/// indexing a tenant's repo -- is where it actually belongs.
+/// indexing a tenant's repo -- is where it actually belongs. Named
+/// `repo.git`, not `<slug>.git`, since the slug is now the enclosing
+/// directory's own name ([`tenant_storage_dir`], ADR-0014) -- repeating
+/// it in the bare repo's own name would be redundant.
 pub fn tenant_repo_path(repos_root: &Path, tenant_slug: &str) -> PathBuf {
-    repos_root.join(format!("{tenant_slug}.git"))
+    tenant_storage_dir(repos_root, tenant_slug).join("repo.git")
 }
 
-/// Where a tenant's derived index lives -- a sibling of its bare repo,
-/// not inside it (an `index.db` living inside `<slug>.git/` would need
-/// its own `.gitignore`-equivalent carve-out from git's own object
-/// database, for no benefit).
+/// Where a tenant's derived index lives -- a sibling of its bare repo
+/// inside [`tenant_storage_dir`] (ADR-0014), not inside the bare repo
+/// itself (an `index.db` living inside `repo.git/` would need its own
+/// `.gitignore`-equivalent carve-out from git's own object database,
+/// for no benefit) and not a sibling directly under the flat, shared
+/// `repos_root` either (issue #165: that isn't part of the same mount
+/// a tenant's pod gets, so it was never actually host-persisted or
+/// visible outside whichever container most recently wrote it).
 pub fn tenant_index_path(repos_root: &Path, tenant_slug: &str) -> PathBuf {
-    repos_root.join(format!("{tenant_slug}.index.db"))
+    tenant_storage_dir(repos_root, tenant_slug).join("index.db")
 }
 
 /// Creates `tenant_slug`'s bare repo (idempotent: safe to call again
@@ -186,7 +205,7 @@ mod tests {
         let repos_root = temp.path();
         let repo_path = provision_tenant_repo(repos_root, "acme").expect("provision");
 
-        assert_eq!(repo_path, repos_root.join("acme.git"));
+        assert_eq!(repo_path, repos_root.join("acme").join("repo.git"));
         assert!(repo_path.join("HEAD").exists(), "must be a real bare repo");
         assert_eq!(
             wkp_git::get_local_config(&repo_path, "receive.fsckObjects").as_deref(),
