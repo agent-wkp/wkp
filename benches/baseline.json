@@ -6,7 +6,7 @@
     "mean_ns": 40674104.455
   },
   "incremental_update_50k_corpus": {
-    "mean_ns": 383039844.35
+    "mean_ns": 2972512.950794876
   },
   "cold_search_50k_corpus": {
     "mean_ns": 280114.81567882246

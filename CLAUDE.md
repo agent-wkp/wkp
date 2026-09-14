@@ -20,7 +20,7 @@ Read in this order before starting any task: this file, `docs/design/wkp-hub-des
 - Rust edition 2021 or later, toolchain pinned in `rust-toolchain.toml`. `#![forbid(unsafe_code)]` in every crate except `wkp-sys`.
 - No `Command::new("git")` outside `crates/wkp-git`. All git access goes through its plumbing wrapper.
 - Secrets never touch argv or environment variables. Read them from the OS keystore, a `0600` file, or stdin.
-- Files a harness reads (`tier0.md`, `index.db`) are written to a temp file in the same directory and renamed into place. Never write them in place.
+- Flat files a harness reads directly (`tier0.md`, future tier files) are written to a temp file in the same directory and renamed into place. Never write them in place — a plain file has no internal atomicity to lean on. `index.db` is the one named exception (ADR-0002): its writes go through a real SQLite transaction (`BEGIN IMMEDIATE` ... `COMMIT`) opened directly against the file, since SQLite's own transaction log already gives the same guarantee the temp-and-rename pattern exists to provide.
 - Agent-written memory lands in `inbox/` with `confidence: proposed`. Nothing enters Tier 0 or Tier 1 without a human-signed commit. There is a test for this (`tests/injection-corpus`); do not weaken it.
 - No new on-disk formats. The store is markdown in git; the index is SQLite; the config is TOML.
 - Frontmatter fields and CLI flags are a public contract once merged to `main`. Additive changes only; removals need an ADR.

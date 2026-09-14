@@ -16,6 +16,17 @@ fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
     let tier = compute_tier(&item.path, fm, item.human_signed);
     let tokens_estimate = estimate_tokens(fm, &item.body);
     conn.execute("INSERT INTO paths (path) VALUES (?1)", [&item.path])?;
+    // `paths.path` is a real B-tree (indexed) lookup; `items`/`items_trigram`
+    // are FTS5 tables whose non-full-text columns (`path UNINDEXED`) are
+    // *not* indexed for equality lookups -- a `WHERE path = ?` against them
+    // is a full-corpus scan (benchmarked ~28ms/~17ms respectively at 50k
+    // items, the actual bottleneck behind ADR-0002's incremental-index miss,
+    // not the temp-file-copy mechanism ADR-0002 originally suspected).
+    // Explicitly assigning `paths`' own auto-assigned rowid as both FTS5
+    // tables' rowid lets `delete_item` delete by rowid instead -- an indexed,
+    // O(1) lookup -- while `paths.path` still gives every other caller a
+    // real indexed way to find that rowid from a path.
+    let rowid = conn.last_insert_rowid();
     let embedding_bytes = item
         .embedding
         .as_ref()
@@ -23,11 +34,12 @@ fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
     let embedding_dim = item.embedding.as_ref().map(|v| v.len() as i64);
     conn.execute(
         "INSERT INTO items (
-            path, title, content, tags, item_type, workspace, visibility,
+            rowid, path, title, content, tags, item_type, workspace, visibility,
             scope, confidence, provenance_source, tokens, updated, expires,
             refs, tier, tokens_estimate, embedding, embedding_dim
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         rusqlite::params![
+            rowid,
             item.path,
             fm.title.clone().unwrap_or_default(),
             item.body,
@@ -55,8 +67,8 @@ fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
         item.body
     );
     conn.execute(
-        "INSERT INTO items_trigram (path, content) VALUES (?1, ?2)",
-        rusqlite::params![item.path, trigram_content],
+        "INSERT INTO items_trigram (rowid, path, content) VALUES (?1, ?2, ?3)",
+        rusqlite::params![rowid, item.path, trigram_content],
     )?;
     Ok(())
 }
@@ -164,9 +176,20 @@ pub fn build_index(dest: &Path, items: &[Item]) -> Result<(), IndexError> {
 }
 
 fn delete_item(conn: &Connection, path: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM paths WHERE path = ?1", [path])?;
-    conn.execute("DELETE FROM items WHERE path = ?1", [path])?;
-    conn.execute("DELETE FROM items_trigram WHERE path = ?1", [path])?;
+    // Look up the rowid via `paths`' real B-tree index on `path`, then
+    // delete from both FTS5 tables by rowid rather than by `path` -- see
+    // `insert_item`'s comment on why an unindexed FTS5 `WHERE path = ?`
+    // delete is an O(corpus) scan, not the O(1) this needs.
+    let rowid: Option<i64> = conn
+        .query_row("SELECT rowid FROM paths WHERE path = ?1", [path], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if let Some(rowid) = rowid {
+        conn.execute("DELETE FROM paths WHERE rowid = ?1", [rowid])?;
+        conn.execute("DELETE FROM items WHERE rowid = ?1", [rowid])?;
+        conn.execute("DELETE FROM items_trigram WHERE rowid = ?1", [rowid])?;
+    }
     delete_edges_from(conn, path)?;
     // Known limitation: edges *pointing at* `path` from other, unchanged
     // items are left dangling rather than cleaned up -- `traverse`'s join
@@ -182,75 +205,67 @@ fn delete_item(conn: &Connection, path: &str) -> rusqlite::Result<()> {
 /// hashed and re-indexed", M1-3) to the index at `dest`, without reading
 /// or re-inserting every unchanged item.
 ///
-/// `dest` is still never written in place (CLAUDE.md hard rule): the
-/// current `index.db` is cloned into a fresh temp file with SQLite's own
-/// `VACUUM INTO` (a read of `dest`, not a write to it), the changes are
-/// applied to that copy, and the copy is renamed over `dest` on success.
-/// If `dest` doesn't exist yet, this builds a fresh index instead,
-/// equivalent to [`build_index`] with just `upserts`.
+/// If `dest` doesn't exist yet, this builds a fresh index instead via
+/// [`build_index`] (temp-file-then-rename, same as any first-ever build).
 ///
-/// `VACUUM INTO` copies the whole file regardless of how many rows
-/// change, so this does not make the on-disk write itself proportional
-/// to the change count — what it avoids is the far more expensive part at
-/// realistic corpus scale: re-reading, re-parsing, and re-tokenizing every
-/// unchanged file's content, which is what made the old Python tool's
-/// `git hash-object`-every-file approach slow (design 5.1).
+/// If `dest` exists, per ADR-0002 (accepted): `index.db` is the one named
+/// exception to CLAUDE.md's temp-and-rename hard rule, since SQLite's own
+/// transaction log already gives a reader the same "never see a torn
+/// file, a crash rolls back cleanly" guarantee that rule exists to
+/// provide for a plain file with no engine underneath it. The changes are
+/// applied directly to `dest` inside one `BEGIN IMMEDIATE` transaction,
+/// committed only once every delete/upsert/edge-recompute step succeeds;
+/// any failure (including losing a race for `dest`'s write lock) drops the
+/// transaction, which SQLite rolls back on its own, leaving `dest` exactly
+/// as it was. This replaces the previous `VACUUM INTO`-based copy, which
+/// cloned and compacted the *entire* file on every call regardless of
+/// change count — benchmarked at ~460ms for a 10-item change against a
+/// 50k-item corpus, missing design 4.3's incremental-index target by
+/// roughly an order of magnitude.
 ///
-/// That said, `VACUUM INTO`'s file copy is itself not free at realistic
-/// scale: benchmarked at ~460ms for a 10-item change against a 50k-item
-/// corpus, well past design 4.3's incremental-index target. See
-/// `docs/adr/0002-incremental-index-write-mechanism.md` (status: proposed,
-/// not yet decided) for the options — including writing `dest` in place
-/// inside a SQLite transaction instead, which this function does not do
-/// today, deliberately, pending that decision.
+/// Removing that copy alone only got this to ~370ms, not the target:
+/// profiling found the real cost was `delete_item`'s `WHERE path = ?`
+/// deletes against `items`/`items_trigram`, both FTS5 tables whose `path`
+/// column is `UNINDEXED` (excluded from the full-text index, so equality
+/// lookups against it are a full-table scan, not an indexed one) —
+/// ~28ms/~17ms per delete at 50k items, the dominant cost either way this
+/// function writes `dest`. `insert_item` now assigns each row the same
+/// rowid `paths` (a real B-tree, indexed by `path`) already auto-assigned
+/// it, so `delete_item` deletes from both FTS5 tables by rowid instead —
+/// O(1), not O(corpus). Cost here is now genuinely proportional to the
+/// number of changed rows, not corpus size.
 pub fn update_index(
     dest: &Path,
     upserts: &[Item],
     deleted_paths: &[String],
 ) -> Result<(), IndexError> {
-    let tmp_path = temp_path_for(dest);
-    let _ = std::fs::remove_file(&tmp_path);
-
-    let result = (|| -> Result<(), IndexError> {
-        if dest.exists() {
-            let src = wkp_sys::open(dest)?;
-            src.execute("VACUUM INTO ?1", [tmp_path.to_string_lossy().into_owned()])?;
-        } else {
-            let conn = wkp_sys::open(&tmp_path)?;
-            create_schema(&conn)?;
-        }
-
-        let conn = wkp_sys::open(&tmp_path)?;
-        for path in deleted_paths {
-            delete_item(&conn, path)?;
-        }
-        for item in upserts {
-            // An upsert on a path already present must replace, not
-            // duplicate, its row -- clear it first regardless of whether
-            // the caller classified it as "added" or "modified".
-            delete_item(&conn, &item.path)?;
-            insert_item(&conn, item)?;
-        }
-        // Same reasoning as `populate`: edges recomputed only after every
-        // upserted item's content row exists, so a wikilink in one changed
-        // item can resolve against another changed item in the same batch.
-        // Unchanged items keep whatever edges `VACUUM INTO` already copied.
-        for item in upserts {
-            insert_edges_for_item(&conn, item)?;
-        }
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            std::fs::rename(&tmp_path, dest)?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            Err(e)
-        }
+    if !dest.exists() {
+        return build_index(dest, upserts);
     }
+
+    let mut conn = wkp_sys::open(dest)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    for path in deleted_paths {
+        delete_item(&tx, path)?;
+    }
+    for item in upserts {
+        // An upsert on a path already present must replace, not
+        // duplicate, its row -- clear it first regardless of whether
+        // the caller classified it as "added" or "modified".
+        delete_item(&tx, &item.path)?;
+        insert_item(&tx, item)?;
+    }
+    // Same reasoning as `populate`: edges recomputed only after every
+    // upserted item's content row exists, so a wikilink in one changed
+    // item can resolve against another changed item in the same batch.
+    // Unchanged items keep whatever edges the transaction hasn't touched.
+    for item in upserts {
+        insert_edges_for_item(&tx, item)?;
+    }
+
+    tx.commit()?;
+    Ok(())
 }
 
 fn temp_path_for(dest: &Path) -> PathBuf {
@@ -507,21 +522,63 @@ mod tests {
     fn failed_update_leaves_previous_index_db_untouched() {
         let dir = temp_db_dir("update-crash");
         let dest = dir.path().join("index.db");
-        // A file that exists but isn't a valid SQLite database: VACUUM
-        // INTO's read of it as the update's source fails immediately,
-        // before the temp file is ever renamed over dest.
+        // A file that exists but isn't a valid SQLite database: the very
+        // first statement inside update_index's transaction fails trying
+        // to read it, before anything is ever committed to dest.
         std::fs::write(&dest, b"not a sqlite database").expect("seed non-sqlite dest");
 
         let result = update_index(&dest, &[item("c.md", "C", "content")], &[]);
         assert!(
             result.is_err(),
-            "expected VACUUM INTO to fail on a non-sqlite source"
+            "expected update_index to fail against a non-sqlite dest"
         );
 
         let bytes_after = std::fs::read(&dest).expect("read dest after failed update");
         assert_eq!(
             bytes_after, b"not a sqlite database",
             "a failed update must not modify or truncate the existing dest file"
+        );
+    }
+
+    /// ADR-0002's own consequence: now that `update_index` writes `dest`
+    /// directly instead of copying it first, a failure genuinely
+    /// mid-transaction (not just an upfront corrupt file) must still roll
+    /// back cleanly. Holding `dest`'s write lock from a second connection
+    /// forces `update_index`'s own `BEGIN IMMEDIATE` to fail acquiring it
+    /// (default busy_timeout is 0, so this fails immediately rather than
+    /// hanging) -- a real contention failure, not a simulated one.
+    #[test]
+    fn update_index_rolls_back_cleanly_when_it_cannot_acquire_the_write_lock() {
+        let dir = temp_db_dir("update-locked");
+        let dest = dir.path().join("index.db");
+        build_index(&dest, &[item("a.md", "A", "first version")]).expect("initial build");
+        let original_bytes = std::fs::read(&dest).expect("read original index.db");
+
+        let blocker = wkp_sys::open(&dest).expect("open blocking connection");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("acquire dest's write lock from the blocking connection");
+
+        let result = update_index(&dest, &[item("b.md", "B", "second item")], &[]);
+        assert!(
+            result.is_err(),
+            "expected update_index to fail while dest's write lock is held elsewhere"
+        );
+
+        drop(blocker);
+
+        let bytes_after = std::fs::read(&dest).expect("read dest after failed update");
+        assert_eq!(
+            original_bytes, bytes_after,
+            "a failed update must not modify the previously published index.db"
+        );
+
+        let conn = open_index(&dest).expect("open index");
+        let hits = search(&conn, "first", &SearchFilter::default()).expect("search");
+        assert_eq!(
+            hits.len(),
+            1,
+            "previous content must still be queryable after the rollback"
         );
     }
 }
