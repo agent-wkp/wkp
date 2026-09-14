@@ -613,6 +613,24 @@ criteria = "safe-to-deploy"
 version = "1.1.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.landlock]]
+version = "0.4.7"
+criteria = "safe-to-deploy"
+notes = """
+NOT independently line-by-line audited by the agent that added this
+dependency (M6-1: Linux write-sandboxing via Landlock, issue #170, design
+7.5). Read the crate's own source directly (`fs.rs`) to confirm
+`AccessFs::from_write` is exactly the write-only access class needed, and
+hand-verified the resulting restriction takes effect end-to-end (a real
+process, real denied/allowed writes -- see `crates/wkp-cli/src/sandbox.rs`
+and its integration test) rather than trusting the API surface alone. Still
+short of a full audit of the crate's ~7400-line diff. This exemption
+substitutes for the "safe-to-deploy" review CODEOWNERS calls for on
+sandbox-rule changes (CLAUDE.md's non-negotiable priority 2) and should be
+replaced with a real `cargo vet certify` by a human reviewer before being
+treated as durable.
+"""
+
 [[exemptions.libc]]
 version = "0.2.189"
 criteria = "safe-to-deploy"
@@ -960,6 +978,26 @@ criteria = "safe-to-deploy"
 [[exemptions.sec1]]
 version = "0.7.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.seccompiler]]
+version = "0.4.0"
+criteria = "safe-to-deploy"
+notes = """
+NOT independently line-by-line audited by the agent that added this
+dependency (M6-1: Linux seccomp syscall-denylist filter, issue #170, design
+7.5). This is the same crate AWS Firecracker uses for its own seccomp
+filtering. The security-critical question -- which of `SeccompFilter::new`'s
+two action parameters is the catch-all for *unlisted* syscalls versus the
+action for explicitly-listed ones -- was ambiguous enough in the crate's own
+docs that it was confirmed empirically instead of trusted from prose: a
+standalone forked-child program (kept out of this crate, in complete process
+isolation) applied a filter and observed the actual pass/fail behavior. See
+`crates/wkp-cli/src/sandbox.rs`'s doc comment for the reasoning. Still short
+of a full audit of the crate's ~5800-line diff. This exemption substitutes
+for the "safe-to-deploy" review CODEOWNERS calls for on sandbox-rule changes
+(CLAUDE.md's non-negotiable priority 2) and should be replaced with a real
+`cargo vet certify` by a human reviewer before being treated as durable.
+"""
 
 [[exemptions.secrecy]]
 version = "0.10.3"
