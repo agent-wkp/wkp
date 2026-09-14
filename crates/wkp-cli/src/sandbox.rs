@@ -51,27 +51,38 @@ use std::path::Path;
 /// post-compromise technique (ptrace-based process injection, mount
 /// manipulation, module loading -- all meaningful if `wkp` or a `git`
 /// subprocess it spawns were ever compromised by malicious content).
+/// A `const` array (rather than a function) doesn't work here: `SYS_iopl`
+/// and `SYS_ioperm` (x86 I/O port permission control -- ARM has no legacy
+/// I/O port address space, so `libc` doesn't define them for `aarch64` at
+/// all) can only be included on the architectures where they exist. This
+/// was a real `aarch64-unknown-linux-musl` cross-compile failure (`E0425:
+/// cannot find value SYS_iopl in crate libc`), not a hypothetical -- caught
+/// by this repo's own cross-compile CI job, not local testing (this
+/// session's own `cargo build` only ever ran on x86_64).
 #[cfg(target_os = "linux")]
-const DENIED_SYSCALLS: &[i64] = &[
-    libc::SYS_ptrace,
-    libc::SYS_process_vm_readv,
-    libc::SYS_process_vm_writev,
-    libc::SYS_mount,
-    libc::SYS_umount2,
-    libc::SYS_pivot_root,
-    libc::SYS_reboot,
-    libc::SYS_kexec_load,
-    libc::SYS_init_module,
-    libc::SYS_finit_module,
-    libc::SYS_delete_module,
-    libc::SYS_acct,
-    libc::SYS_swapon,
-    libc::SYS_swapoff,
-    libc::SYS_iopl,
-    libc::SYS_ioperm,
-    libc::SYS_personality,
-    libc::SYS_bpf,
-];
+fn denied_syscalls() -> Vec<i64> {
+    let mut denied = vec![
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_reboot,
+        libc::SYS_kexec_load,
+        libc::SYS_init_module,
+        libc::SYS_finit_module,
+        libc::SYS_delete_module,
+        libc::SYS_acct,
+        libc::SYS_swapon,
+        libc::SYS_swapoff,
+        libc::SYS_personality,
+        libc::SYS_bpf,
+    ];
+    #[cfg(target_arch = "x86_64")]
+    denied.extend([libc::SYS_iopl, libc::SYS_ioperm]);
+    denied
+}
 
 /// Restricts write-class filesystem access ([`landlock::AccessFs::from_write`])
 /// to exactly `allowed_write_paths`, applied to this process and (where
@@ -138,7 +149,7 @@ pub(crate) fn restrict_writes_to(allowed_write_paths: &[&Path]) -> std::io::Resu
     Ok(())
 }
 
-/// Applies [`DENIED_SYSCALLS`] to this process. Verified by hand (a
+/// Applies [`denied_syscalls`] to this process. Verified by hand (a
 /// standalone forked-child test program, so a wrong-polarity filter
 /// could never affect anything but that throwaway child): built a
 /// filter listing only one syscall (`ptrace`) with `mismatch_action =
@@ -161,8 +172,8 @@ pub(crate) fn restrict_dangerous_syscalls() -> std::io::Result<()> {
     let arch = TargetArch::aarch64;
 
     let mut rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
-    for syscall in DENIED_SYSCALLS {
-        rules.insert(*syscall, vec![]);
+    for syscall in denied_syscalls() {
+        rules.insert(syscall, vec![]);
     }
 
     let filter = SeccompFilter::new(

@@ -58,8 +58,13 @@ fn write_sandbox_allows_inside_denies_outside() {
 
 #[test]
 fn syscall_filter_leaves_ordinary_operations_working() {
+    let probe_dir = tempfile::tempdir().expect("tempdir");
+
     let output = Command::new(wkp_bin())
-        .args(["__sandbox-self-test-syscalls"])
+        .args([
+            "__sandbox-self-test-syscalls",
+            probe_dir.path().to_str().expect("utf8 path"),
+        ])
         .output()
         .expect("run wkp __sandbox-self-test-syscalls");
 

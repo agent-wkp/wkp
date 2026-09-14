@@ -542,6 +542,21 @@ fn main() {
             std::process::exit(if inside_ok && outside_denied { 0 } else { 1 });
         }
         Some("__sandbox-self-test-syscalls") => {
+            // Takes a directory to probe into rather than reaching for
+            // `std::env::temp_dir()` itself: a shared, world-writable
+            // system temp directory with a predictable name is exactly
+            // the "insecure temporary file" pattern our own CI's
+            // semgrep rust ruleset flags (symlink-preexistence attacks
+            // on a guessable path). The caller (`tests/sandbox_integration.rs`)
+            // creates a fresh, exclusively-owned `tempfile::tempdir()`
+            // for this -- the same secure-creation pattern
+            // `__sandbox-self-test-write` above already relies on for
+            // its own directories -- so this binary never has to make
+            // its own claim about temp-file safety.
+            let Some(probe_dir) = args.next() else {
+                eprintln!("wkp: usage: wkp __sandbox-self-test-syscalls <writable-dir>");
+                std::process::exit(2);
+            };
             if let Err(e) = sandbox::restrict_dangerous_syscalls() {
                 eprintln!("SANDBOX_SETUP_ERROR: {e}");
                 std::process::exit(2);
@@ -552,11 +567,8 @@ fn main() {
             // filter is applied, which alone would catch a
             // catastrophically backwards filter (one that denies
             // everything by default instead of the intended handful).
-            let ordinary_write_ok = std::fs::write(
-                std::env::temp_dir().join(format!("wkp-sandbox-selftest-{}", std::process::id())),
-                b"ok",
-            )
-            .is_ok();
+            let ordinary_write_ok =
+                std::fs::write(Path::new(&probe_dir).join("ok.txt"), b"ok").is_ok();
             println!("ORDINARY_WRITE_OK={ordinary_write_ok}");
             std::process::exit(if ordinary_write_ok { 0 } else { 1 });
         }
