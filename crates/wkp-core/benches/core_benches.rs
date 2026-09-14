@@ -105,25 +105,26 @@ fn fixture_corpus_generate_50k(c: &mut Criterion) {
 /// a handful of files changed.
 ///
 /// Honest caveat, documented rather than hidden: `update_index` still
-/// copies the whole `index.db` file via `VACUUM INTO` to honor the
-/// never-write-in-place rule (CLAUDE.md), so the on-disk I/O is
-/// proportional to corpus size, not change count. What *is* proportional
-/// to change count -- and was the actual cost the old Python tool paid
-/// per file on every run (design 5.1: "detects change by running
-/// `git hash-object` on every file") -- is the parsing/tokenizing work
-/// this benchmark's setup does once per changed item, not once per corpus
-/// item. See `crates/wkp-core/src/index.rs`'s `update_index` doc comment.
+/// applies deletes/upserts directly against `dest` inside one SQLite
+/// transaction (ADR-0002, accepted), so the on-disk write is proportional
+/// to changed rows, not corpus size. What *was* proportional to corpus
+/// size until this bench caught it: `delete_item`'s `WHERE path = ?`
+/// against `items`/`items_trigram`, both FTS5 tables whose `path` column
+/// is `UNINDEXED` -- an equality lookup against it is a full-table scan,
+/// not an indexed one. `insert_item` now assigns each row the same rowid
+/// `paths` (a real B-tree, indexed by `path`) already auto-assigned it, so
+/// deletes go by rowid instead. See `crates/wkp-core/src/index.rs`'s
+/// `update_index` doc comment.
 ///
 /// This benchmark measured 383-462ms mean on the 50k fixture across two
 /// separate ubuntu-latest CI runs (tmpfs, 20 samples) for a 10-item change
-/// -- design 4.3's incremental-index target (p50 < 30ms / p95 < 100ms) is
-/// missed by roughly an order of magnitude either way, because `VACUUM
-/// INTO`'s copy dominates. This is a real design-vs-reality conflict, not a
-/// bug: see
-/// `docs/adr/0002-incremental-index-write-mechanism.md` for the options and
-/// the (not yet made) decision. `benches/baseline.json`'s entry for this
-/// bench exists to catch a *further* regression on top of this
-/// already-known-slow path, not to imply the target is currently met.
+/// before this fix -- design 4.3's incremental-index target (p50 < 30ms /
+/// p95 < 100ms) was missed by roughly an order of magnitude. After: ~2.9-4ms
+/// locally (not yet re-measured in CI; `benches/baseline.json` gets the real
+/// CI number once this PR's bench job runs). See
+/// `docs/adr/0002-incremental-index-write-mechanism.md` for the full
+/// decision, including the FTS5-indexing finding the ADR's original options
+/// didn't anticipate.
 fn incremental_update_50k_corpus(c: &mut Criterion) {
     let dir = bench_dir("incremental-50k");
     let dest = dir.join("index.db");

@@ -32,14 +32,18 @@ the same corpora. Update `BENCHES` in `compare.sh` and re-run
 **M1-3 (change detection) added `incremental_update_50k_corpus`**: builds a
 50k-item index once, then times `wkp_core::index::update_index` re-applying
 a 10-item change against it — the steady-state `wkp index` scenario. This
-measured ~460ms on `ubuntu-latest`, missing design 4.3's incremental-index
-target (p50 < 30ms / p95 < 100ms) by roughly an order of magnitude, because
-the current implementation's `VACUUM INTO` copies the whole file regardless
-of change count. This is a real, documented design-vs-reality conflict, not
-a regression to chase away with a threshold — see
-`docs/adr/0002-incremental-index-write-mechanism.md` for the options and the
-(not yet made) decision. The baseline entry for this bench exists to catch a
-*further* regression on top of the already-known-slow path.
+originally measured ~460ms on `ubuntu-latest`, missing design 4.3's
+incremental-index target (p50 < 30ms / p95 < 100ms) by roughly an order of
+magnitude — not because of the `VACUUM INTO` copy mechanism originally
+suspected, but because `delete_item`'s `WHERE path = ?` deletes against two
+FTS5 tables with an unindexed `path` column were full 50k-row scans.
+**Fixed (ADR-0002, accepted, issue #29)**: `index.db` writes now go directly
+against `dest` inside one SQLite transaction instead of a `VACUUM INTO`
+copy, and `insert_item`/`delete_item` address FTS5 rows by rowid (aligned
+with `paths`' own indexed rowid) instead of by the unindexed `path` column.
+Measured ~2.9-4ms locally, comfortably inside the target; see
+`docs/adr/0002-incremental-index-write-mechanism.md` for the full write-up
+and `benches/baseline.json` for the real CI-measured number.
 
 **M1-4 (`wkp search`) added `cold_search_50k_corpus`**: opens a fresh
 connection to a 50k-item `index.db` and runs one query per iteration,

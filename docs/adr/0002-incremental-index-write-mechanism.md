@@ -1,7 +1,7 @@
 # ADR-0002: How `wkp index` writes incremental changes to `index.db`
 
-Status: proposed
-Date: 2026-09-07
+Status: accepted
+Date: 2026-09-07 (decided 2026-09-13, issue #29)
 Design sections affected: 4.2 ("Atomic apply on the read path"), 4.3 (latency targets), 5.1 (change detection)
 
 ## Context
@@ -90,48 +90,74 @@ file" implementation of the rule.
 
 ## Decision
 
-**Not yet made — this ADR is filed as `proposed`, not `accepted`, per
-CLAUDE.md's instruction to flag the conflict rather than resolve it
-unilaterally when it touches a hard rule.** The M1-3 PR ships option 1 (the
-rule-compliant, benchmarked-slow `VACUUM INTO` implementation) as the
-working default, with this ADR linked from the PR description and the
-benchmark's own doc comment, so the gap is visible rather than hidden. A
-human reviewer should pick between option 1 (accept the miss, revisit
-later), option 2 (the recommended fix: scope the temp-and-rename rule's
-"never write in place" clause to flat files, not SQLite databases, which
-carry their own atomicity), or option 3 (measure the backup API before
-trusting it).
+**Option 2, accepted 2026-09-13 (issue #29).** `index.db` is a named
+exception to CLAUDE.md's temp-and-rename hard rule: `wkp_core::index::store::update_index`
+now opens `dest` directly and applies deletes/upserts/edge-recomputation
+inside one `BEGIN IMMEDIATE` ... `COMMIT` transaction, relying on SQLite's
+own transaction log for the same "a reader never sees a torn file, a crash
+rolls back cleanly" guarantee the temp-and-rename pattern exists to provide
+for a plain file with no engine underneath it. `tier0.md` and any future
+flat file a harness reads directly keep the unconditional temp-and-rename
+treatment — this exception is scoped to `index.db` specifically, per
+CLAUDE.md's updated wording.
 
-**Recommendation, for the reviewer's benefit, not asserted as decided:**
-option 2. The temp-and-rename rule's own stated purpose (design 4.2: "a
-reader never sees a torn file") is already satisfied by SQLite's engine for
-`index.db`; applying the same rule built for `tier0.md` (a plain markdown
-file with no internal transactional guarantee) to a SQLite database imposes
-a real, benchmarked, order-of-magnitude latency cost to protect against a
-failure mode — a torn write — that the database engine underneath it
-already prevents on its own.
+**A second, unanticipated finding, made while verifying the fix actually
+closes the gap:** removing `VACUUM INTO` alone was not sufficient. Local
+benchmarking (`cargo bench -p wkp-core incremental_update_50k_corpus`,
+instrumented per-phase to find where the remaining time went) showed the
+in-place transaction still cost ~365-390ms for a 10-item change — barely
+better than `VACUUM INTO`'s ~460ms. The actual dominant cost was
+`delete_item`'s two `DELETE ... WHERE path = ?1` statements against
+`items` and `items_trigram`, both FTS5 virtual tables whose `path` column
+is declared `UNINDEXED` (excluded from the full-text index specifically so
+it isn't tokenized/searched, which also means SQLite has no index to use
+for an equality lookup against it) — each delete was a full 50,000-row
+table scan (~28ms and ~17ms respectively, ×10 changed items ≈ the entire
+measured cost; `paths`' own `DELETE ... WHERE path = ?1`, a real B-tree
+primary key, took microseconds by comparison). This cost exists regardless
+of whether the surrounding write mechanism is `VACUUM INTO`, a fresh
+temp-file build, or an in-place transaction — it is intrinsic to deleting
+FTS5 rows by an unindexed column, and would have limited *any* of this
+ADR's four options equally once real per-row deletes were exercised at
+corpus scale.
+
+**Fix**: `insert_item` now assigns each row the same rowid `paths` (a real
+table, indexed by its `TEXT PRIMARY KEY` on `path`) already auto-assigns it
+via `conn.last_insert_rowid()`, using FTS5's support for explicit rowid
+insertion (`INSERT INTO items (rowid, path, ...) VALUES (?1, ?2, ...)`).
+`delete_item` looks up the rowid via `paths`' indexed `path` column, then
+deletes from `items`/`items_trigram` by rowid — an indexed, effectively
+O(1) operation — instead of by the unindexed `path` column.
+
+**Result** (measured locally, `cargo bench -p wkp-core
+incremental_update_50k_corpus`, same 50k fixture / 10-item change as the
+original ~460ms measurement): **~2.9-4ms**, comfortably inside design 4.3's
+p50 < 30ms / p95 < 100ms target — a ~99% reduction from the original
+`VACUUM INTO` baseline. `benches/baseline.json` is updated from a real CI
+run (not this local number) per this repo's own documented baseline-capture
+practice.
 
 ## Consequences
 
-- If option 2 is accepted: `CLAUDE.md`'s hard rule needs a one-line
-  amendment scoping "never write in place" to flat files a harness reads
-  directly (`tier0.md`, future tier files), explicitly carving out
-  `index.db` as SQLite-transaction-safe instead. `wkp_core::index::update_index`
-  is rewritten to open `dest` directly and wrap its changes in a
-  transaction; the existing atomicity test
-  (`failed_update_leaves_previous_index_db_untouched`) needs a new version
-  asserting the same property (previous content survives a failed update)
-  under the new mechanism, likely by forcing a mid-transaction error and
-  checking the file rolls back rather than checking byte-identity of an
-  unrelated file (`VACUUM INTO`'s failure mode doesn't apply once `dest` is
-  opened directly).
-- If option 1 stands: design 4.3's incremental-index target needs either a
-  documented exception for large corpora, or a follow-up issue tracking the
-  gap, so it doesn't quietly become a target nobody is measuring against
-  anymore.
-- Either way, `crates/wkp-core/benches/core_benches.rs`'s
-  `incremental_update_50k_corpus` bench and its `benches/baseline.json`
-  entry stay in the tree as the regression gate for whichever mechanism is
-  chosen — the current baseline (~460 ms) exists specifically so a *further*
-  regression on top of the already-known-slow path is still caught, and so
-  a fix's improvement is measurable against a real prior number.
+- `CLAUDE.md`'s hard rule now scopes "never write in place" to flat files a
+  harness reads directly (`tier0.md`, future tier files), explicitly
+  carving out `index.db` as SQLite-transaction-safe instead.
+  `wkp_core::index::store::update_index` opens `dest` directly and wraps
+  its changes in a `BEGIN IMMEDIATE` transaction.
+- The existing atomicity test (`failed_update_leaves_previous_index_db_untouched`)
+  stays (a corrupt-dest failure still can't corrupt `dest` further), and a
+  new test (`update_index_rolls_back_cleanly_when_it_cannot_acquire_the_write_lock`)
+  forces a genuine failure to acquire `dest`'s write lock (a second
+  connection holds `BEGIN IMMEDIATE` open) and confirms the previous
+  content survives untouched and stays queryable — the "mid-transaction
+  failure" case this ADR originally flagged as needed.
+- `insert_item`/`delete_item` now depend on `paths`' auto-assigned rowid
+  being explicitly mirrored onto `items`/`items_trigram` — any future code
+  that inserts into those FTS5 tables directly (bypassing `insert_item`)
+  must preserve this invariant or `delete_item`'s rowid-based deletes will
+  silently stop finding the row to delete.
+- `crates/wkp-core/benches/core_benches.rs`'s `incremental_update_50k_corpus`
+  bench and its `benches/baseline.json` entry stay in the tree as the
+  regression gate going forward — updated from the ~460ms `VACUUM INTO`
+  baseline to the new in-place/rowid-delete number, captured from a real CI
+  run per this repo's own documented baseline-capture practice.
