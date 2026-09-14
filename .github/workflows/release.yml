@@ -93,12 +93,26 @@ jobs:
         run: cross build --release --locked -p wkp-cli --target ${{ matrix.target }}
 
       - name: checksum
+        # `sha256sum` doesn't exist on the macOS runner (a real,
+        # previously-undiscovered bug: this job runs across
+        # matrix.os including macos-14, but this step was never
+        # actually exercised until the first real tag push --
+        # `sha256sum: command not found`, exit 127). `shasum -a 256`
+        # is the macOS-native equivalent and produces the identical
+        # `<hash>  <filename>` output format `verify-reproducible`'s
+        # `cut -d' ' -f1` parsing expects; falls back to it only when
+        # `sha256sum` itself isn't found, rather than assuming which
+        # one this specific runner has.
         run: |
           BIN="target/${{ matrix.target }}/release/wkp"
           OUT="wkp-${{ matrix.target }}"
           mkdir -p "$OUT"
           cp "$BIN" "$OUT/wkp"
-          sha256sum "$OUT/wkp" > "$OUT/wkp.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$OUT/wkp" > "$OUT/wkp.sha256"
+          else
+            shasum -a 256 "$OUT/wkp" > "$OUT/wkp.sha256"
+          fi
           cat "$OUT/wkp.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
