@@ -1,17 +1,26 @@
-//! M5-4's own explicit acceptance criterion: "a real bare repo + hook
-//! fixture, a real `git push` ... confirming the hook ran and only the
-//! shared item landed in the index" -- proven here against the real,
-//! compiled `wkp-hub` binary (`env!("CARGO_BIN_EXE_wkp-hub")`), not by
-//! calling `index_tenant` directly the way `tenant_repo`'s own unit
-//! tests do. Those unit tests exercise the indexing *logic*; this test
-//! exercises the *wiring* -- that `wkp-hub provision-repo` really
-//! installs a hook that really runs on a real push and really produces
-//! the tenant's `index.db`.
+//! Issue #159's own wiring test: a real `git push` against a real bare
+//! repo, followed by a real, separately-invoked `wkp-hub index-worker
+//! --tenant <slug> --once` subprocess, proving the *new* trigger
+//! mechanism actually works end to end -- that command notices `HEAD`
+//! moved and produces the tenant's `index.db` -- not by calling
+//! `index_tenant`/`current_head` directly the way `tenant_repo`'s own
+//! unit tests do (those exercise the indexing *logic*; this exercises
+//! the *wiring* a real push and a real second process depend on).
 //!
-//! Needs no Postgres: `provision-repo`/`index-tenant` are both
+//! Replaces `post_receive_hook.rs` (deleted): there is no `post-receive`
+//! hook installed any more (see `tenant_repo.rs`'s module doc) -- the
+//! indexing container polls on its own instead, since a hook running in
+//! the *serving* container has no network-free way to reach across to
+//! the separate, no-network *indexing* container that issue #159 splits
+//! it into (`tenant_pod.rs`'s module doc). `--once` makes that poll loop
+//! deterministic for a test: run exactly one check-and-maybe-index
+//! cycle and exit, rather than looping forever the way the real
+//! container's foreground process does.
+//!
+//! Needs no Postgres: `provision-repo`/`index-worker` are both
 //! deliberately DB-free (see `main.rs`'s own doc comment on
 //! `provision-repo`), so this test has no `DATABASE_URL` dependency
-//! unlike this crate's `control_plane`/`http`/`wkp_shell` tests.
+//! unlike this crate's `control_plane`/`http`/`front_door` tests.
 //!
 //! Uses `Command::new("git")` directly to drive a throwaway client
 //! clone -- the same narrow, documented exception to CLAUDE.md's "no
@@ -46,13 +55,13 @@ fn run_wkp_hub(repos_root: &Path, args: &[&str]) -> std::process::Output {
 
 fn temp_repos_root() -> tempfile::TempDir {
     tempfile::Builder::new()
-        .prefix("wkp-hub-post-receive-hook-test-")
+        .prefix("wkp-hub-index-worker-test-")
         .tempdir()
         .expect("create temp repos root")
 }
 
 #[test]
-fn a_real_push_triggers_the_installed_hook_and_indexes_only_the_shared_item() {
+fn index_worker_once_notices_a_real_push_and_indexes_only_the_shared_item() {
     let temp = temp_repos_root();
     let repos_root = temp.path();
 
@@ -63,18 +72,17 @@ fn a_real_push_triggers_the_installed_hook_and_indexes_only_the_shared_item() {
         String::from_utf8_lossy(&provision.stderr)
     );
 
-    // The installed hook invokes bare `wkp-hub` (relies on `PATH` --
-    // this task's own deliberate choice, real deployment wiring is
-    // M5-5's job). Only the test's own subprocess PATH needs the real
-    // compiled binary made reachable under that exact name; production
-    // `provision_tenant_repo` is unchanged.
-    let bin_dir = Path::new(wkp_hub_bin())
-        .parent()
-        .expect("CARGO_BIN_EXE_wkp-hub has a parent dir");
-    let path_with_bin = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
+    // Before any push: nothing to index yet, and `index-worker --once`
+    // must reflect that rather than erroring on an unborn HEAD.
+    let before = run_wkp_hub(repos_root, &["index-worker", "--tenant", "acme", "--once"]);
+    assert!(
+        before.status.success(),
+        "index-worker --once must succeed against an unborn repo: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+    assert!(
+        !repos_root.join("acme.index.db").exists(),
+        "index-worker must not produce index.db before anything has been pushed"
     );
 
     let repo_path = repos_root.join("acme.git");
@@ -108,25 +116,29 @@ fn a_real_push_triggers_the_installed_hook_and_indexes_only_the_shared_item() {
             "add shared and private items",
         ],
     );
+    run_git(&clone_dir, &["push", "--quiet", "origin", "main"]);
 
-    // `WKP_HUB_REPOS_ROOT` must reach the hook's own `wkp-hub
-    // index-tenant` subprocess, which git spawns as a *child of this
-    // `git push`*, not of the earlier `provision-repo` invocation --
-    // env vars don't reach sideways between unrelated subprocesses.
-    let push_status = Command::new("git")
-        .current_dir(&clone_dir)
-        .env("PATH", &path_with_bin)
-        .env("WKP_HUB_REPOS_ROOT", repos_root)
-        .args(["push", "--quiet", "origin", "main"])
-        .status()
-        .expect("run git push");
-    assert!(push_status.success(), "git push failed: {push_status:?}");
+    // No hook fired -- `index.db` must not exist yet purely from the
+    // push itself. This is the behavior change issue #159's fix
+    // deliberately makes: indexing is now the index-worker's own job,
+    // triggered by it noticing HEAD moved, not the push's.
+    assert!(
+        !repos_root.join("acme.index.db").exists(),
+        "a push alone must not produce index.db any more -- that's index-worker's job now, \
+         not a post-receive hook's"
+    );
+
+    let after = run_wkp_hub(repos_root, &["index-worker", "--tenant", "acme", "--once"]);
+    assert!(
+        after.status.success(),
+        "index-worker --once failed: {}",
+        String::from_utf8_lossy(&after.stderr)
+    );
 
     let index_path = repos_root.join("acme.index.db");
     assert!(
         index_path.exists(),
-        "post-receive hook must have run `wkp-hub index-tenant` and produced index.db, \
-         but {} does not exist",
+        "index-worker --once must have noticed the push and produced index.db, but {} does not exist",
         index_path.display()
     );
 
@@ -135,6 +147,6 @@ fn a_real_push_triggers_the_installed_hook_and_indexes_only_the_shared_item() {
     assert_eq!(
         known,
         std::collections::HashSet::from(["shared.md".to_string()]),
-        "the hook must have indexed only the shared item, never the private one"
+        "index-worker must have indexed only the shared item, never the private one"
     );
 }

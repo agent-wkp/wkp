@@ -32,6 +32,11 @@ WORKDIR /src
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tests ./tests
+# Only this one file, not the whole `deploy/` tree: `tenant_pod.rs`
+# embeds it at compile time via `include_str!` (issue #159's
+# indexing-container seccomp profile) -- everything else under
+# `deploy/` is deployment tooling this image itself doesn't need to see.
+COPY deploy/hub/seccomp-no-network.json ./deploy/hub/seccomp-no-network.json
 # `rustup show` alone installs the pinned toolchain named in
 # rust-toolchain.toml (rustup's own documented trigger for this), so
 # the actual `cargo build` below uses exactly that version.
