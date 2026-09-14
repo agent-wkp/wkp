@@ -267,7 +267,26 @@ jobs:
     # documentation states it "MUST be referenced by a tag of the form
     # @vX.Y.Z" and that shorter refs or hash references cause it to fail
     # -- a real, documented exception to SHA-pinning, not an oversight.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    #
+    # Pinned to v1.10.0, not the current v2.1.0/v2.0.0: pushing a real
+    # tag (v0.1.0-rc1/rc2) to actually exercise this pipeline found that
+    # calling @v2.1.0 or @v2.0.0 fails GitHub's own workflow-validation
+    # step before any job runs at all (`startup_failure`, zero jobs
+    # created) -- reproduced with a minimal, standalone, isolated
+    # reusable-workflow-call (no `needs`, no job-level `permissions`, no
+    # `if`, a hardcoded `with:` input), so it isn't anything in this
+    # file's own use of it. Confirmed it isn't "reusable workflows are
+    # broken from this repo" in general either (an unrelated public
+    # reusable workflow from a different repo ran fine). @v1.10.0,
+    # tested the same isolated way, passes validation and runs its real
+    # jobs (detect-env/generator/final). Root cause not fully identified
+    # (v2.0.0's changelog only documents unrelated breaking changes --
+    # `actions/upload-artifact`/`download-artifact` pinned to `@v4`, the
+    # `attestation-name` input's removal, DSSE-format Rekor entries --
+    # none of which obviously explain a validation-time failure); revisit
+    # pinning forward once this is understood, rather than silently
+    # carrying an unverified newer version.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.10.0
     with:
       base64-subjects: "${{ needs['hashes-for-provenance'].outputs.hashes }}"
       upload-assets: false # publish-draft-release attaches this job's own artifact to the release itself, alongside the binaries and signatures, in one place
