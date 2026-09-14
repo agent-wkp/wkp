@@ -21,12 +21,29 @@ mod promote;
 mod purge;
 mod remember;
 mod resolve_conflicts;
+mod sandbox;
 mod search;
 mod sync_cmd;
 mod wkpd;
 
 #[cfg(test)]
 mod test_support;
+
+/// M6-1 (issue #170, design 7.5): restricts write-class filesystem
+/// access to `store_path` before a write-heavy subcommand does any
+/// real I/O. Non-fatal on error -- an actual `Err` here (not the
+/// already-handled "kernel doesn't support Landlock" case, which
+/// `sandbox::restrict_writes_to` itself logs and treats as success)
+/// means the sandbox setup itself hit something unexpected; failing
+/// the whole command over a brand-new hardening layer would trade a
+/// real functional regression for a marginal, unproven security gain,
+/// backwards from design 7.5's own "hardening, not a hard requirement"
+/// framing.
+fn apply_write_sandbox(store_path: &Path) {
+    if let Err(e) = sandbox::restrict_writes_to(&[store_path]) {
+        eprintln!("wkp: write-sandbox setup failed, continuing without it: {e}");
+    }
+}
 
 fn main() {
     // Dispatching on a CLI flag, not a security-sensitive use of argv.
@@ -135,13 +152,16 @@ fn main() {
                 std::process::exit(1);
             }
             match index_cmd::parse_index_args(args) {
-                Ok(opts) => match index_cmd::run_index_cli(&opts) {
-                    Ok(summary) => println!("{summary}"),
-                    Err(msg) => {
-                        eprintln!("wkp: index failed: {msg}");
-                        std::process::exit(1);
+                Ok(opts) => {
+                    apply_write_sandbox(&opts.path);
+                    match index_cmd::run_index_cli(&opts) {
+                        Ok(summary) => println!("{summary}"),
+                        Err(msg) => {
+                            eprintln!("wkp: index failed: {msg}");
+                            std::process::exit(1);
+                        }
                     }
-                },
+                }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
                     std::process::exit(1);
@@ -173,13 +193,16 @@ fn main() {
                 std::process::exit(1);
             }
             match remember::parse_remember_args(args) {
-                Ok(opts) => match remember::run_remember(&opts) {
-                    Ok(summary) => println!("{summary}"),
-                    Err(msg) => {
-                        eprintln!("wkp: remember failed: {msg}");
-                        std::process::exit(1);
+                Ok(opts) => {
+                    apply_write_sandbox(&opts.path);
+                    match remember::run_remember(&opts) {
+                        Ok(summary) => println!("{summary}"),
+                        Err(msg) => {
+                            eprintln!("wkp: remember failed: {msg}");
+                            std::process::exit(1);
+                        }
                     }
-                },
+                }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
                     std::process::exit(1);
@@ -192,13 +215,16 @@ fn main() {
                 std::process::exit(1);
             }
             match promote::parse_promote_args(args) {
-                Ok(opts) => match promote::run_promote(&opts) {
-                    Ok(summary) => println!("{summary}"),
-                    Err(msg) => {
-                        eprintln!("wkp: promote failed: {msg}");
-                        std::process::exit(1);
+                Ok(opts) => {
+                    apply_write_sandbox(&opts.path);
+                    match promote::run_promote(&opts) {
+                        Ok(summary) => println!("{summary}"),
+                        Err(msg) => {
+                            eprintln!("wkp: promote failed: {msg}");
+                            std::process::exit(1);
+                        }
                     }
-                },
+                }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
                     std::process::exit(1);
@@ -234,6 +260,7 @@ fn main() {
             }
             match forget::parse_forget_args(args) {
                 Ok(opts) => {
+                    apply_write_sandbox(&opts.path);
                     let result = match &opts.target {
                         forget::ForgetTarget::Item(item_path) => {
                             let item_path = item_path.clone();
@@ -489,6 +516,61 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        // Undocumented on purpose (M6-1, issue #170): not real user
+        // subcommands, just a way for `tests/sandbox_integration.rs`
+        // to exercise `sandbox.rs`'s two functions as real subprocesses
+        // of the actually-compiled `wkp` binary, using only safe
+        // operations -- proving the *specific* denied syscalls
+        // (`ptrace` etc.) actually fail needs an `unsafe` FFI call this
+        // crate's own `#![forbid(unsafe_code)]` doesn't allow, so that
+        // half was verified by hand instead; see `sandbox.rs`'s own
+        // doc comments for exactly how.
+        Some("__sandbox-self-test-write") => {
+            let (Some(allowed), Some(denied)) = (args.next(), args.next()) else {
+                eprintln!("wkp: usage: wkp __sandbox-self-test-write <allowed-dir> <denied-dir>");
+                std::process::exit(2);
+            };
+            if let Err(e) = sandbox::restrict_writes_to(&[Path::new(&allowed)]) {
+                eprintln!("SANDBOX_SETUP_ERROR: {e}");
+                std::process::exit(2);
+            }
+            let inside_ok = std::fs::write(Path::new(&allowed).join("ok.txt"), b"ok").is_ok();
+            let outside_denied =
+                std::fs::write(Path::new(&denied).join("nope.txt"), b"nope").is_err();
+            println!("INSIDE_WRITE_OK={inside_ok} OUTSIDE_WRITE_DENIED={outside_denied}");
+            std::process::exit(if inside_ok && outside_denied { 0 } else { 1 });
+        }
+        Some("__sandbox-self-test-syscalls") => {
+            // Takes a directory to probe into rather than reaching for
+            // `std::env::temp_dir()` itself: a shared, world-writable
+            // system temp directory with a predictable name is exactly
+            // the "insecure temporary file" pattern our own CI's
+            // semgrep rust ruleset flags (symlink-preexistence attacks
+            // on a guessable path). The caller (`tests/sandbox_integration.rs`)
+            // creates a fresh, exclusively-owned `tempfile::tempdir()`
+            // for this -- the same secure-creation pattern
+            // `__sandbox-self-test-write` above already relies on for
+            // its own directories -- so this binary never has to make
+            // its own claim about temp-file safety.
+            let Some(probe_dir) = args.next() else {
+                eprintln!("wkp: usage: wkp __sandbox-self-test-syscalls <writable-dir>");
+                std::process::exit(2);
+            };
+            if let Err(e) = sandbox::restrict_dangerous_syscalls() {
+                eprintln!("SANDBOX_SETUP_ERROR: {e}");
+                std::process::exit(2);
+            }
+            // Only a *safe* probe is possible in this crate (see the
+            // comment above `Some("__sandbox-self-test-write")`):
+            // confirms an ordinary syscall still works after the
+            // filter is applied, which alone would catch a
+            // catastrophically backwards filter (one that denies
+            // everything by default instead of the intended handful).
+            let ordinary_write_ok =
+                std::fs::write(Path::new(&probe_dir).join("ok.txt"), b"ok").is_ok();
+            println!("ORDINARY_WRITE_OK={ordinary_write_ok}");
+            std::process::exit(if ordinary_write_ok { 0 } else { 1 });
         }
         _ => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
