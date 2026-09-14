@@ -10,7 +10,18 @@ name: Scorecard supply-chain security
 
 on:
   push:
-    branches: [main, v2-rust]
+    # main only, not v2-rust: `ossf/scorecard-action` structurally
+    # refuses to run at all on a `push` event to any branch other than
+    # the repo's actual GitHub-configured default branch -- confirmed
+    # the hard way (every push to v2-rust since this workflow existed
+    # has failed with "refs/heads/v2-rust not supported with push
+    # event. Only the default branch main is supported.", not a config
+    # mistake this repo could route around). `pull_request` below
+    # already exercises `score-gate` against v2-rust on every PR (and
+    # does work there -- the action's own restriction is push-specific);
+    # this becomes a non-issue on its own once the M6 cutover (#161)
+    # makes v2-rust's content live on `main`.
+    branches: [main]
   # Experimental per ossf/scorecard-action's own docs ("pull_request...
   # triggers are experimental," "not supported on a fork repository").
   # This repo's own PRs are always same-repo branches, never forks, so

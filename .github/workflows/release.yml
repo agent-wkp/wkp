@@ -269,7 +269,7 @@ jobs:
     # -- a real, documented exception to SHA-pinning, not an oversight.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: "${{ needs.hashes-for-provenance.outputs.hashes }}"
+      base64-subjects: "${{ needs['hashes-for-provenance'].outputs.hashes }}"
       upload-assets: false # publish-draft-release attaches this job's own artifact to the release itself, alongside the binaries and signatures, in one place
 
   sbom:
@@ -412,7 +412,7 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ needs.provenance.outputs.provenance-name }}
+          name: ${{ needs.provenance.outputs['provenance-name'] }}
           path: provenance
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -449,8 +449,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          IMAGE: ${{ needs.oci-image.outputs.image }}
-          DIGEST: ${{ needs.oci-image.outputs.digest }}
+          IMAGE: ${{ needs['oci-image'].outputs.image }}
+          DIGEST: ${{ needs['oci-image'].outputs.digest }}
         run: |
           {
             echo "Reproducible cross-target build, verified by two independent CI runners per target (issue #172)."
