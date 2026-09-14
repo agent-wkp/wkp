@@ -19,11 +19,13 @@
 #    produces index.db, proving the network restriction doesn't
 #    silently break the feature it's supposed to protect, not just that
 #    isolation exists in isolation from anything actually working.
-#    Checked inside the indexing container itself (`podman exec`), not
-#    on the host: the bind mount only covers the bare repo, not the
-#    sibling index.db path, so it never lands on the host at all today
-#    -- a separate, real gap (issue #165), not something to paper over
-#    here by checking the wrong path.
+#    Checked on the *host* path (ADR-0014/issue #165: both containers
+#    bind-mount the tenant's whole storage directory, not just the bare
+#    repo, so index.db is host-persisted and visible from either
+#    container, not only whichever one most recently wrote it) and,
+#    for good measure, from the *serving* container too -- the actual
+#    point of #165's fix, not just that the indexing container itself
+#    can see its own output.
 #
 # Wired into CI as part of the `hub-pod-isolation` job
 # (`.github/workflows/rust-ci.yml`), alongside its siblings
@@ -119,20 +121,26 @@ podman run --rm --network wkp-hub-tenants \
     }
 
 log "waiting for the (network-isolated) index-worker to notice and re-index"
-# Checked *inside* the indexing container, not on the host: the bind
-# mount only covers the bare repo (repos_root/<slug>.git), not the
-# sibling <slug>.index.db path `index_tenant` writes to, so index.db
-# only ever lands in whichever container's own (ephemeral) filesystem
-# ran it -- a real, separate gap (issue #165), not something this test
-# should paper over by checking the wrong path.
+# Checked on the host path (ADR-0014/issue #165): repos_root/<slug> is
+# the tenant's whole storage directory, bind-mounted as a unit into
+# both containers, so index.db (a sibling of repo.git inside it) is
+# host-persisted now, not stuck inside whichever container wrote it.
+INDEX_PATH="$WKP_HUB_REPOS_ROOT/${TENANT}/index.db"
 DEADLINE=$((SECONDS + 15))
-while ! podman exec "$INDEX_CONTAINER" test -e "/srv/wkp-hub/repos/${TENANT}.index.db"; do
+while [ ! -e "$INDEX_PATH" ]; do
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-        echo "FAIL: index-worker did not produce ${TENANT}.index.db (inside its own container) within 15s of the push" >&2
+        echo "FAIL: index-worker did not produce $INDEX_PATH within 15s of the push" >&2
         exit 1
     fi
     sleep 0.5
 done
-log "PASS: the network-isolated indexing container still indexed the push"
+log "PASS: the network-isolated indexing container still indexed the push (host-persisted)"
+
+log "confirming the serving container sees the same index.db too (the actual point of #165's fix)"
+if ! podman exec "$SERVE_CONTAINER" test -e "/srv/wkp-hub/repos/${TENANT}/index.db"; then
+    echo "FAIL: the serving container cannot see index.db -- the two containers aren't sharing the same mount" >&2
+    exit 1
+fi
+log "PASS: both containers see the same index.db"
 
 log "ALL CHECKS PASSED"
