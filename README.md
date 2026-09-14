@@ -1,5 +1,14 @@
 # WKP — Workspace Knowledge Protocol
 
+> **This Python implementation is retired.** `agent-wkp` is being rewritten as
+> `wkp`, a single static Rust binary — see the
+> [`v2-rust` branch](https://github.com/williamcaban/agent-wkp/tree/v2-rust)
+> and its [design doc](https://github.com/williamcaban/agent-wkp/blob/v2-rust/docs/design/wkp-hub-design-v0.1.md).
+> Install channels for the new binary are GitHub Releases, a Homebrew tap,
+> and an OCI image (coming with that rewrite's M6 milestone) — not PyPI.
+> This tag/history is frozen at [`v0-python`](https://github.com/williamcaban/agent-wkp/tree/v0-python)
+> for anyone still depending on the Python package.
+
 Progressive disclosure knowledge index for AI agent workspaces. WKP turns a directory of markdown files into a searchable, tier-aware knowledge store that any agent harness can consume — without heavy infrastructure.
 
 ## The problem it solves
@@ -266,7 +275,7 @@ WKP uses a `VectorBackend` protocol so the storage layer can be swapped without 
 | 100k+ or multi-agent | `ChromaDBBackend` | `WKP_BACKEND=chromadb` |
 | Enterprise / RHOAI | `PGVectorBackend` | `WKP_BACKEND=memoryhub` |
 
-See [docs/architecture.md](docs/architecture.md) for the full design.
+See [docs/v0/architecture.md](docs/v0/architecture.md) for the full design.
 
 ## License
 
