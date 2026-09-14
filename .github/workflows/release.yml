@@ -1,0 +1,192 @@
+name: Release
+
+# Design 9.6 / M6-3 (issue #172): reproducible release build pipeline.
+# This is the *first piece* of the release pipeline (design 9.6: "No
+# release workflow, signing, or SLSA provenance exists today") -- cosign
+# signing + SLSA provenance (issue #173), SBOM attachment (issue #174),
+# and the Homebrew tap / OCI image publishing (issues #175/#176) are
+# separate, later tasks that extend this workflow's own draft release
+# rather than replacing it.
+#
+# Reproducibility is verified for real, not assumed: every target is
+# built twice, on two independent runner instances (the `attempt`
+# matrix dimension below), and a separate job fails the whole workflow
+# if the two attempts' SHA256 hashes don't match -- the same "verify by
+# hand against the real mechanism" standard issue #159's seccomp profile
+# and issue #165's shared-mount fix were held to.
+#
+# Triggers on a `v*` tag push for a real release, or manually
+# (`workflow_dispatch`) so this pipeline itself can be exercised and
+# iterated on without cutting an actual release tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }}, attempt ${{ matrix.attempt }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-14
+        attempt: [1, 2]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: "1.98.1" # keep in sync with rust-toolchain.toml
+          targets: ${{ matrix.target }}
+
+      # Deliberately no Swatinem/rust-cache here, unlike rust-ci.yml's
+      # cross-compile jobs -- a warm incremental-compilation cache is
+      # exactly the kind of build-environment difference that could make
+      # two "reproducible" builds diverge for reasons that have nothing
+      # to do with the source tree. Slower, but this workflow runs on a
+      # release tag or by hand, never per-PR, so the cost is acceptable.
+
+      # SOURCE_DATE_EPOCH: the commit's own timestamp, not "now" -- the
+      # whole point is that building this exact commit later still
+      # produces the same bytes, which requires a value derived from the
+      # commit itself, not the wall-clock time of whichever attempt runs
+      # first.
+      - name: set SOURCE_DATE_EPOCH from the commit timestamp
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: install cross
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --version 0.2.5 --locked
+
+      - name: cargo build --release --target ${{ matrix.target }}
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        env:
+          # Normalizes the absolute build path embedded in debug info and
+          # panic messages -- both attempts of the same target run on the
+          # same OS, so `GITHUB_WORKSPACE` already matches between them
+          # today, but this removes that coincidence as a hidden
+          # assumption rather than relying on it holding forever.
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/build"
+        run: cargo build --release --locked -p wkp-cli --target ${{ matrix.target }}
+
+      - name: cross build --release --target ${{ matrix.target }}
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        env:
+          RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/build"
+        run: cross build --release --locked -p wkp-cli --target ${{ matrix.target }}
+
+      - name: checksum
+        run: |
+          BIN="target/${{ matrix.target }}/release/wkp"
+          OUT="wkp-${{ matrix.target }}"
+          mkdir -p "$OUT"
+          cp "$BIN" "$OUT/wkp"
+          sha256sum "$OUT/wkp" > "$OUT/wkp.sha256"
+          cat "$OUT/wkp.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wkp-${{ matrix.target }}-attempt${{ matrix.attempt }}
+          path: wkp-${{ matrix.target }}/
+          retention-days: 7
+
+  verify-reproducible:
+    name: verify reproducible (${{ matrix.target }})
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wkp-${{ matrix.target }}-attempt1
+          path: attempt1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wkp-${{ matrix.target }}-attempt2
+          path: attempt2
+
+      - name: compare SHA256 hashes across the two independent builds
+        run: |
+          H1=$(cut -d' ' -f1 attempt1/wkp.sha256)
+          H2=$(cut -d' ' -f1 attempt2/wkp.sha256)
+          echo "attempt 1: $H1"
+          echo "attempt 2: $H2"
+          if [ "$H1" != "$H2" ]; then
+            echo "::error::${{ matrix.target }} is not reproducible: two independent builds of the same commit produced different binaries"
+            exit 1
+          fi
+
+      # Named `release-wkp-*`, not `wkp-*` -- the `build` job's own
+      # per-attempt artifacts are also named `wkp-<target>-attempt<N>`,
+      # and `publish-draft-release` below downloads by a `wkp-*` glob.
+      # A shared prefix would let it silently pull in an *unverified*
+      # attempt instead of this job's own hash-checked one.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-wkp-${{ matrix.target }}
+          path: attempt1/
+          retention-days: 30
+
+  publish-draft-release:
+    name: publish draft release
+    needs: verify-reproducible
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-wkp-*
+          path: dist
+          merge-multiple: false
+
+      - name: lay out release assets
+        run: |
+          mkdir -p release
+          for dir in dist/release-wkp-*; do
+            target=$(basename "$dir" | sed 's/^release-wkp-//')
+            cp "$dir/wkp" "release/wkp-${target}"
+            cp "$dir/wkp.sha256" "release/wkp-${target}.sha256"
+          done
+          ls -la release/
+
+      # Draft, not published: issue #173 (cosign signing + SLSA
+      # provenance) and issue #174 (SBOM) both still need to attach to
+      # this same release before it's something a user should trust
+      # enough to download and run. Publishing it live at this stage
+      # would look like a finished, signed release when it isn't one yet.
+      - name: gh release create --draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" release/* \
+            --draft \
+            --title "${{ github.ref_name }} (draft, unsigned -- issues #173/#174 pending)" \
+            --notes "Reproducible cross-target build, verified by two independent CI runners per target (issue #172). **Not yet signed** and **has no SBOM** -- issues #173/#174 add both before this draft is a real release."
