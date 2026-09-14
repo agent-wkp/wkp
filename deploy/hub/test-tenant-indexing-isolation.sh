@@ -19,6 +19,11 @@
 #    produces index.db, proving the network restriction doesn't
 #    silently break the feature it's supposed to protect, not just that
 #    isolation exists in isolation from anything actually working.
+#    Checked inside the indexing container itself (`podman exec`), not
+#    on the host: the bind mount only covers the bare repo, not the
+#    sibling index.db path, so it never lands on the host at all today
+#    -- a separate, real gap (issue #165), not something to paper over
+#    here by checking the wrong path.
 #
 # Wired into CI as part of the `hub-pod-isolation` job
 # (`.github/workflows/rust-ci.yml`), alongside its siblings
@@ -114,10 +119,16 @@ podman run --rm --network wkp-hub-tenants \
     }
 
 log "waiting for the (network-isolated) index-worker to notice and re-index"
+# Checked *inside* the indexing container, not on the host: the bind
+# mount only covers the bare repo (repos_root/<slug>.git), not the
+# sibling <slug>.index.db path `index_tenant` writes to, so index.db
+# only ever lands in whichever container's own (ephemeral) filesystem
+# ran it -- a real, separate gap (issue #165), not something this test
+# should paper over by checking the wrong path.
 DEADLINE=$((SECONDS + 15))
-while [ ! -e "$WKP_HUB_REPOS_ROOT/${TENANT}.index.db" ]; do
+while ! podman exec "$INDEX_CONTAINER" test -e "/srv/wkp-hub/repos/${TENANT}.index.db"; do
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-        echo "FAIL: index-worker did not produce ${TENANT}.index.db within 15s of the push" >&2
+        echo "FAIL: index-worker did not produce ${TENANT}.index.db (inside its own container) within 15s of the push" >&2
         exit 1
     fi
     sleep 0.5
