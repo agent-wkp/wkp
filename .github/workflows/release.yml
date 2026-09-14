@@ -36,6 +36,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `target` must be a real matrix dimension of its own (not
+        # only present inside `include`), so `attempt` cross-products
+        # against it (3 targets x 2 attempts = 6 jobs) and `include`'s
+        # entries -- which share the `target` key with those 6 -- get
+        # merged into each matching one (adding `os`) rather than
+        # creating their own standalone combinations. Got this
+        # backwards originally (`include` alone, no top-level
+        # `target:`): the real v0.1.0-rc5 tag push found only 2 of the
+        # intended 6 build jobs ever ran (both aarch64-apple-darwin,
+        # attempt 1 and 2 -- the *last* include entry, applied to
+        # every attempt-only combination instead of creating separate
+        # per-target ones), which is exactly GitHub's documented
+        # behavior when an include entry shares no key with the base
+        # matrix: it's added as its own new combination, last one
+        # wins when multiple entries have nothing to distinguish them
+        # by outside of `attempt`.
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+        attempt: [1, 2]
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
@@ -43,7 +64,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-14
-        attempt: [1, 2]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
