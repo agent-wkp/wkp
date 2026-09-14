@@ -368,15 +368,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # M5-7 (#110)'s own two still-open acceptance criteria: a real
-    # tenant pod reachable by its container-runtime DNS alias (not
-    # just intra-pod localhost), and a real cross-tenant filesystem
-    # isolation check ("not just the application-level path
-    # restriction M5-4 already has"). Both scripts run `wkp-hub`
-    # directly on the runner (not inside a container) -- unlike
-    # `hub-mtls-integration` above, neither needs the HTTPS front door
-    # itself, only real podman/network access. Same Postgres service
-    # container the other jobs use, for the same reason.
+    # M5-7 (#110)'s own two acceptance criteria (a real tenant pod
+    # reachable by its container-runtime DNS alias, not just intra-pod
+    # localhost; a real cross-tenant filesystem isolation check "not
+    # just the application-level path restriction M5-4 already has"),
+    # plus issue #159's own required test (a tenant's indexing
+    # container genuinely cannot reach the network, not just a
+    # code-review claim). All three scripts run `wkp-hub` directly on
+    # the runner (not inside a container) -- unlike
+    # `hub-mtls-integration` above, none of them needs the HTTPS front
+    # door itself, only real podman/network access. Same Postgres
+    # service container the other jobs use, for the same reason.
     services:
       postgres:
         image: postgres@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94 # 16
@@ -420,3 +422,8 @@ jobs:
         env:
           WKP_HUB_BIN: ${{ github.workspace }}/target/release/wkp-hub
         run: bash deploy/hub/test-cross-tenant-isolation.sh
+
+      - name: deploy/hub/test-tenant-indexing-isolation.sh
+        env:
+          WKP_HUB_BIN: ${{ github.workspace }}/target/release/wkp-hub
+        run: bash deploy/hub/test-tenant-indexing-isolation.sh
