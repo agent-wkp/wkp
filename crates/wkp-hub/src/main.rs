@@ -229,6 +229,70 @@ fn main() {
                 }
             }
         }
+        Some("index-worker") => {
+            // Issue #159: the process a tenant's own *indexing*
+            // container runs -- never the *serving* one, and, per
+            // `tenant_pod.rs`'s own doc comment, launched with no
+            // network access at all. Polls `tenant_repo::current_head`
+            // (a plain filesystem read, no different from what any
+            // other command in this file already does) rather than
+            // relying on a hook the serving container would otherwise
+            // have to reach across to trigger -- see `tenant_repo.rs`'s
+            // module doc for why a hook can't do that here any more.
+            let mut tenant_slug = None;
+            let mut poll_interval_ms: u64 = 500;
+            let mut once = false;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--tenant" => tenant_slug = args.next(),
+                    "--poll-interval-ms" => {
+                        poll_interval_ms = args
+                            .next()
+                            .and_then(|p| p.parse::<u64>().ok())
+                            .unwrap_or(poll_interval_ms)
+                    }
+                    "--once" => once = true,
+                    _ => {}
+                }
+            }
+            let Some(tenant_slug) = tenant_slug else {
+                eprintln!(
+                    "wkp-hub: usage: wkp-hub index-worker --tenant <slug> \
+                     [--poll-interval-ms <ms>] [--once]"
+                );
+                std::process::exit(1);
+            };
+            let repos_root = repos_root();
+            let mut last_indexed_head: Option<String> = None;
+            loop {
+                let head = tenant_repo::current_head(&repos_root, &tenant_slug);
+                if head.is_some() && head != last_indexed_head {
+                    match tenant_repo::index_tenant(&repos_root, &tenant_slug) {
+                        Ok(summary) => {
+                            println!(
+                                "wkp-hub: index-worker: indexed {} item(s) for tenant \
+                                 {tenant_slug} at {}, skipped {} private item(s)",
+                                summary.indexed.len(),
+                                head.as_deref().unwrap_or("?"),
+                                summary.skipped_private.len()
+                            );
+                            last_indexed_head = head;
+                        }
+                        // A transient error (e.g. a push landing mid-read)
+                        // must not kill the worker -- the next poll tick
+                        // retries against whatever HEAD is by then, same
+                        // as if this tick had simply run a little later.
+                        Err(e) => {
+                            eprintln!("wkp-hub: index-worker: index_tenant failed: {e}");
+                        }
+                    }
+                }
+                if once {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(poll_interval_ms));
+            }
+        }
         Some("provision-repo") => {
             // The git/filesystem half of `tenant create`, exposed on its
             // own: genuinely useful on its own (re-provisioning a repo
@@ -571,6 +635,7 @@ fn main() {
                  device revoke <public-key> | device revoke-id <device-id> | \
                  reset-all-connections --by <label> | \
                  index-tenant <tenant-slug> | \
+                 index-worker --tenant <slug> [--poll-interval-ms <ms>] [--once] | \
                  provision-repo <tenant-slug> | start-pod <tenant-slug> | \
                  stop-pod <tenant-slug> | reap-idle-pods [--idle-minutes <n>]"
             );

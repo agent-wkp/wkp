@@ -1,17 +1,30 @@
-//! Per-tenant bare repo provisioning and post-receive indexing (design
-//! 8.2, 8.3, M5-4).
+//! Per-tenant bare repo provisioning and indexing (design 8.2, 8.3,
+//! M5-4; indexing's trigger mechanism rewritten by issue #159).
 //!
-//! Two halves:
+//! Three parts:
 //!
 //! - [`provision_tenant_repo`]: creates the bare repo at
-//!   [`tenant_repo_path`]'s fixed convention, hardens it
+//!   [`tenant_repo_path`]'s fixed convention and hardens it
 //!   (`receive.fsckObjects`, `transfer.fsckObjects` -- design 8.3's own
-//!   hardening table), and installs a `post-receive` hook that indexes
-//!   on every push.
-//! - [`index_tenant`]: what that hook actually runs. Reads every
-//!   tracked path at `HEAD` straight from the object database (no
-//!   working tree exists in a bare repo to read from instead), and
-//!   builds this tenant's own `index.db` from the *shared* subset only.
+//!   hardening table).
+//! - [`index_tenant`]: reads every tracked path at `HEAD` straight from
+//!   the object database (no working tree exists in a bare repo to
+//!   read from instead), and builds this tenant's own `index.db` from
+//!   the *shared* subset only.
+//! - [`current_head`]: what `wkp-hub index-worker` (`main.rs`, running
+//!   as its own no-network container per `tenant_pod.rs`, issue #159)
+//!   polls to decide whether to call [`index_tenant`] again. There is
+//!   no `post-receive` hook installed here any more -- a hook running
+//!   inside the *serving* container would need to reach across to the
+//!   separate indexing container to trigger it, and the only ways to
+//!   do that are either a network call (defeats the point: the whole
+//!   reason for two containers is that the indexing one can't make or
+//!   accept one) or a shared-filesystem signal file, which is no
+//!   simpler or more reliable than the indexing container simply
+//!   noticing `HEAD` moved on its own. Bounded staleness (up to one
+//!   poll interval after a push) replaces the old hook's synchronous
+//!   guarantee; `wkp-hub index-worker`'s own doc comment states the
+//!   default interval.
 //!
 //! **Never touches `visibility: private` content.** The hub holds no
 //! device's decryption key at all (design 8's whole point), so a
@@ -38,22 +51,6 @@ pub fn tenant_repo_path(repos_root: &Path, tenant_slug: &str) -> PathBuf {
     repos_root.join(format!("{tenant_slug}.git"))
 }
 
-/// `hooks/post-receive`'s own content: hardcodes this tenant's slug (a
-/// bare repo is dedicated to exactly one tenant, per
-/// [`tenant_repo_path`]'s convention) rather than
-/// trying to pass it as an argument -- git invokes post-receive hooks
-/// with no arguments at all, ref-update info arrives on stdin instead,
-/// which indexing has no use for (it always (re)indexes the whole tree
-/// at `HEAD`, not just what changed).
-///
-/// Bare command name, not an absolute path: the same deliberate choice
-/// `wkp-shell`'s own `command=` line makes (M5-3) -- relies on
-/// `wkp-hub` being on `PATH` in the deployment environment, real
-/// wiring of which is M5-5's container job, not this one's.
-fn post_receive_hook_script(tenant_slug: &str) -> String {
-    format!("#!/bin/sh\nexec wkp-hub index-tenant {tenant_slug}\n")
-}
-
 /// Where a tenant's derived index lives -- a sibling of its bare repo,
 /// not inside it (an `index.db` living inside `<slug>.git/` would need
 /// its own `.gitignore`-equivalent carve-out from git's own object
@@ -64,32 +61,37 @@ pub fn tenant_index_path(repos_root: &Path, tenant_slug: &str) -> PathBuf {
 
 /// Creates `tenant_slug`'s bare repo (idempotent: safe to call again
 /// against an already-provisioned tenant, `git init --bare` on an
-/// existing bare repo is a no-op) and installs its post-receive hook.
-/// Called from `wkp-hub tenant create` so one command leaves a tenant
-/// both registered in the control plane and actually push/pull-able.
+/// existing bare repo is a no-op). Called from `wkp-hub tenant create`
+/// so one command leaves a tenant both registered in the control plane
+/// and actually push/pull-able.
 pub fn provision_tenant_repo(repos_root: &Path, tenant_slug: &str) -> Result<PathBuf, String> {
     let repo_path = tenant_repo_path(repos_root, tenant_slug);
     wkp_git::init_bare_repo(&repo_path)?;
     wkp_git::set_local_config(&repo_path, "receive.fsckObjects", "true")?;
     wkp_git::set_local_config(&repo_path, "transfer.fsckObjects", "true")?;
-
-    let hooks_dir = repo_path.join("hooks");
-    std::fs::create_dir_all(&hooks_dir).map_err(|e| e.to_string())?;
-    let hook_path = hooks_dir.join("post-receive");
-    std::fs::write(&hook_path, post_receive_hook_script(tenant_slug)).map_err(|e| e.to_string())?;
-    set_executable(&hook_path)?;
-
     Ok(repo_path)
 }
 
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .map_err(|e| e.to_string())?
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
+/// The commit `tenant_slug`'s bare repo's `HEAD` currently resolves to,
+/// or `None` for an unborn repo (nothing pushed yet). What `wkp-hub
+/// index-worker`'s poll loop (`main.rs`, issue #159) compares against
+/// its own last-seen value to decide whether to call [`index_tenant`]
+/// again -- cheap (`git rev-parse HEAD` via `wkp_git::current_commit`,
+/// no working tree needed for a bare repo) and, like everything else in
+/// this module, entirely filesystem-based.
+pub fn current_head(repos_root: &Path, tenant_slug: &str) -> Option<String> {
+    let repo_path = tenant_repo_path(repos_root, tenant_slug);
+    let sha = wkp_git::current_commit(&repo_path).ok()?;
+    // `wkp_git::current_commit` runs `git rev-parse HEAD`, not `--verify
+    // HEAD` -- for an unborn repo (nothing pushed yet) that doesn't
+    // error, it echoes the literal ref name `"HEAD"` back as if it were
+    // a resolved value. Filter that out rather than treating it as a
+    // real, indexable commit.
+    if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(sha)
+    } else {
+        None
+    }
 }
 
 /// Summary of one `index_tenant` run, returned so both the CLI and this
@@ -179,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn provision_tenant_repo_creates_a_hardened_bare_repo_with_a_hook() {
+    fn provision_tenant_repo_creates_a_hardened_bare_repo() {
         let temp = temp_repos_root("provision");
         let repos_root = temp.path();
         let repo_path = provision_tenant_repo(repos_root, "acme").expect("provision");
@@ -195,8 +197,13 @@ mod tests {
             Some("true")
         );
 
-        let hook = std::fs::read_to_string(repo_path.join("hooks/post-receive")).expect("hook");
-        assert!(hook.contains("wkp-hub index-tenant acme"));
+        // Deliberately no hook (issue #159): indexing is triggered by
+        // `wkp-hub index-worker` polling `current_head`, not by
+        // anything running inside the serving container/process.
+        assert!(
+            !repo_path.join("hooks/post-receive").exists(),
+            "no post-receive hook should be installed any more"
+        );
     }
 
     #[test]
@@ -205,6 +212,88 @@ mod tests {
         let repos_root = temp.path();
         provision_tenant_repo(repos_root, "acme").expect("first provision");
         provision_tenant_repo(repos_root, "acme").expect("second provision must not fail");
+    }
+
+    #[test]
+    fn current_head_is_none_for_an_unborn_repo_and_some_after_a_commit() {
+        let temp = temp_repos_root("current-head");
+        let repos_root = temp.path();
+        provision_tenant_repo(repos_root, "acme").expect("provision");
+
+        assert_eq!(
+            current_head(repos_root, "acme"),
+            None,
+            "an unborn repo has no HEAD commit yet"
+        );
+
+        let clone_dir = repos_root.join("clone");
+        run_git(
+            repos_root,
+            &[
+                "clone",
+                "--quiet",
+                repo_path_str(repos_root, "acme").as_str(),
+                "clone",
+            ],
+        );
+        run_git(&clone_dir, &["checkout", "--quiet", "-b", "main"]);
+        std::fs::write(
+            clone_dir.join("a.md"),
+            "---\nvisibility: shared\n---\n\nbody\n",
+        )
+        .expect("write a.md");
+        run_git(&clone_dir, &["add", "-A"]);
+        run_git(
+            &clone_dir,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "--quiet",
+                "-m",
+                "first commit",
+            ],
+        );
+        run_git(&clone_dir, &["push", "--quiet", "origin", "main"]);
+
+        let first = current_head(repos_root, "acme").expect("HEAD must resolve after a push");
+        assert_eq!(first.len(), 40, "expected a full SHA-1 hex commit id");
+
+        std::fs::write(
+            clone_dir.join("b.md"),
+            "---\nvisibility: shared\n---\n\nmore\n",
+        )
+        .expect("write b.md");
+        run_git(&clone_dir, &["add", "-A"]);
+        run_git(
+            &clone_dir,
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "--quiet",
+                "-m",
+                "second commit",
+            ],
+        );
+        run_git(&clone_dir, &["push", "--quiet", "origin", "main"]);
+
+        let second = current_head(repos_root, "acme").expect("HEAD must resolve after a push");
+        assert_ne!(
+            first, second,
+            "HEAD must change after a second push -- this is what the index-worker poll loop diffs against"
+        );
+    }
+
+    fn repo_path_str(repos_root: &Path, tenant_slug: &str) -> String {
+        tenant_repo_path(repos_root, tenant_slug)
+            .to_str()
+            .expect("repo path must be valid UTF-8")
+            .to_string()
     }
 
     #[test]
@@ -318,12 +407,12 @@ mod tests {
     }
 
     /// Test-only, narrow exception to CLAUDE.md's "no `Command::new(\"git\")`
-    /// outside `wkp-git`" -- proving a real post-receive-triggering push
-    /// against a real bare repo needs a real `git clone`/`push` from a
-    /// second working copy, which `wkp-git`'s own plumbing (built for
-    /// the client's single-store use, not driving a second throwaway
-    /// clone in a test) has no call for otherwise. Mirrors the same
-    /// documented exception in `wkp-cli/tests/encryption_filter.rs`.
+    /// outside `wkp-git`" -- proving a real push against a real bare repo
+    /// needs a real `git clone`/`push` from a second working copy,
+    /// which `wkp-git`'s own plumbing (built for the client's
+    /// single-store use, not driving a second throwaway clone in a
+    /// test) has no call for otherwise. Mirrors the same documented
+    /// exception in `wkp-cli/tests/encryption_filter.rs`.
     fn run_git(dir: &Path, args: &[&str]) {
         let status = std::process::Command::new("git") // nosemgrep: rust.lang.security.command-injection.command-injection
             .current_dir(dir)
