@@ -54,6 +54,18 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "tls1
 [dev-dependencies]
 tempfile = "3.27.0"
 
+# M6-1 (issue #170, design 7.5): process hardening -- a Landlock
+# ruleset restricting write-class filesystem access, and a seccomp
+# filter denying syscalls no normal `wkp` operation has any legitimate
+# reason to call. Both are Linux-specific (Landlock is a Linux Security
+# Module; seccomp-bpf is a Linux syscall-filtering facility), hence a
+# platform-specific dependency table rather than an unconditional one --
+# the macOS build (`aarch64-apple-darwin`) never compiles either crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.4"
+libc = "0.2"
+
 [features]
 # M1-9: forwards to wkp-core's own opt-in hybrid-search feature. See
 # crates/wkp-core/Cargo.toml and docs/adr/0003-hybrid-search-embed-feature-gate.md.
