@@ -52,15 +52,29 @@ jobs:
         # matrix: it's added as its own new combination, last one
         # wins when multiple entries have nothing to distinguish them
         # by outside of `attempt`.
+        # aarch64-unknown-linux-musl temporarily dropped (William,
+        # 2026-09-14): v0.1.0-rc6 found it's genuinely not
+        # reproducible right now -- the two independent `cross`
+        # (Docker-based) build attempts produced different SHA256
+        # hashes of the same size, a real non-determinism in that
+        # toolchain path, not an infra bug like the ones before it in
+        # this same tag-push verification pass. Root cause not yet
+        # investigated (a real candidate: `cross` builds inside a
+        # container at its own internal path, which
+        # `--remap-path-prefix=${{ github.workspace }}=/build` doesn't
+        # account for, since that's the *host's* workspace path, not
+        # the container's). `rust-ci.yml`'s own cross-compile CI job
+        # still builds and smoke-tests this target on every push/PR --
+        # this only affects the release pipeline's reproducibility
+        # claim specifically. Revisit and re-add once actually fixed;
+        # don't re-add by just deleting this comment without fixing
+        # the underlying non-determinism first.
         target:
           - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
           - aarch64-apple-darwin
         attempt: [1, 2]
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-14
@@ -150,9 +164,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # aarch64-unknown-linux-musl dropped -- see the build job's
+        # own matrix comment above for why.
         target:
           - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
           - aarch64-apple-darwin
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -203,9 +218,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # aarch64-unknown-linux-musl dropped -- see the build job's
+        # own matrix comment above for why.
         target:
           - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
           - aarch64-apple-darwin
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -366,7 +382,7 @@ jobs:
           upload-release-assets: false
 
   oci-image:
-    name: multi-arch OCI image
+    name: OCI image (linux/amd64 only for now, see build job's matrix comment)
     needs: verify-reproducible
     runs-on: ubuntu-latest
     # Pushes a real image to ghcr.io and writes a real, public Rekor
@@ -389,34 +405,31 @@ jobs:
           name: release-wkp-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-wkp-aarch64-unknown-linux-musl
-          path: target/aarch64-unknown-linux-musl/release
-
-      - name: podman build (per architecture, deploy/Containerfile)
+      # linux/arm64 (aarch64-unknown-linux-musl) temporarily dropped
+      # here too -- see the build job's own matrix comment for why.
+      # amd64-only for now, not yet multi-arch; the manifest-list
+      # mechanism below is kept as-is (a manifest list with one
+      # platform is valid) so re-adding arm64 later is just restoring
+      # the second `podman build`/`manifest add` pair, not a rewrite.
+      - name: podman build (deploy/Containerfile)
         run: |
-          chmod +x target/x86_64-unknown-linux-musl/release/wkp target/aarch64-unknown-linux-musl/release/wkp
+          chmod +x target/x86_64-unknown-linux-musl/release/wkp
           podman build --platform linux/amd64 \
             --build-arg TARGET=x86_64-unknown-linux-musl \
             -f deploy/Containerfile -t wkp-amd64 .
-          podman build --platform linux/arm64 \
-            --build-arg TARGET=aarch64-unknown-linux-musl \
-            -f deploy/Containerfile -t wkp-arm64 .
 
       # ghcr.io package names must be lowercase; `github.repository_owner`
       # isn't guaranteed to be (verified by hand: podman build/manifest
       # mechanics above, not this specific lowercasing edge case, since
       # this repo's own owner is already lowercase -- kept as a real
       # safeguard rather than an assumption regardless).
-      - name: build the multi-arch manifest list
+      - name: build the manifest list
         id: image
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/wkp"
           podman manifest create wkp-manifest
           podman manifest add wkp-manifest localhost/wkp-amd64
-          podman manifest add wkp-manifest localhost/wkp-arm64
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: podman login ghcr.io
@@ -504,7 +517,7 @@ jobs:
             echo "Reproducible cross-target build, verified by two independent CI runners per target (issue #172)."
             echo "Signed keylessly with cosign (Fulcio + Rekor) and carries SLSA Build L3 provenance (issue #173)."
             echo "SBOM in both CycloneDX and SPDX formats (issue #174)."
-            echo "Multi-arch OCI image (linux/amd64, linux/arm64), also cosign-signed: \`${IMAGE}@${DIGEST}\` (issue #176)."
+            echo "OCI image (linux/amd64 only for now -- linux/arm64 temporarily dropped, see release.yml's own comment on why), also cosign-signed: \`${IMAGE}@${DIGEST}\` (issue #176)."
             echo
             echo "Verify a binary's signature:"
             echo '```'
