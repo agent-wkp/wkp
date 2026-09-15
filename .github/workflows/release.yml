@@ -423,13 +423,23 @@ jobs:
       # mechanics above, not this specific lowercasing edge case, since
       # this repo's own owner is already lowercase -- kept as a real
       # safeguard rather than an assumption regardless).
+      #
+      # `containers-storage:localhost/wkp-amd64`, not a bare
+      # `localhost/wkp-amd64` -- v0.1.0-rc7 found `podman manifest add`
+      # treats an unprefixed `localhost/...` reference as an actual
+      # registry hostname to pull from over HTTPS ("pinging container
+      # registry localhost: ... connection refused"), not "look in
+      # local image storage" the way `podman build -t wkp-amd64`'s own
+      # implicit `localhost/` tag prefix suggests. The explicit
+      # `containers-storage:` transport prefix is unambiguous -- no
+      # network involved, confirmed locally before trusting it in CI.
       - name: build the manifest list
         id: image
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER_LOWER}/wkp"
           podman manifest create wkp-manifest
-          podman manifest add wkp-manifest localhost/wkp-amd64
+          podman manifest add wkp-manifest containers-storage:localhost/wkp-amd64
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: podman login ghcr.io
