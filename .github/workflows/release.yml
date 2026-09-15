@@ -442,8 +442,19 @@ jobs:
           podman manifest add wkp-manifest containers-storage:localhost/wkp-amd64
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
+      # `--authfile ~/.docker/config.json`, not podman's own default
+      # (`${XDG_RUNTIME_DIR}/containers/auth.json`, confirmed via
+      # `man podman-login`): v0.1.0-rc8 found `cosign sign` below
+      # failed to authenticate to ghcr.io ("User cannot be
+      # authenticated with the token provided") even though this
+      # login step itself succeeded and the manifest push (same
+      # session) worked fine -- cosign doesn't read podman's own auth
+      # file, only the standard Docker credential location. Writing
+      # there directly means both tools share one login.
       - name: podman login ghcr.io
-        run: echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: |
+          mkdir -p "${HOME}/.docker"
+          echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin --authfile "${HOME}/.docker/config.json"
 
       - name: podman manifest push
         run: |
