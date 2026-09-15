@@ -550,7 +550,16 @@ jobs:
             echo
             echo "Left as a draft: this workflow alone isn't all of M6 (design 9.6) -- a human decides when this is actually published."
           } > notes.md
+          # `--repo "$REPO"`, not relying on `gh`'s usual git-remote
+          # auto-detection -- v0.1.0-rc9 found this job has no
+          # `actions/checkout` step (it only ever needed downloaded
+          # artifacts, not the source tree), so there's no `.git`
+          # directory for `gh` to infer the target repo from ("failed
+          # to run git: fatal: not a git repository"). `REPO` is
+          # already set above for the release notes text; explicit
+          # `--repo` avoids adding a whole checkout just for this.
           gh release create "${{ github.ref_name }}" release/* \
+            --repo "$REPO" \
             --draft \
             --title "${{ github.ref_name }}" \
             --notes-file notes.md
