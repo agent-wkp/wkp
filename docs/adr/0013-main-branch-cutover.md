@@ -92,3 +92,38 @@ as a human-timed decision, independent of this ADR).
   remains a separate, human-only action -- related to this cutover in
   spirit (both retire the Python-era artifacts) but not a dependency of it
   either direction.
+
+## Addendum (2026-09-15, William): cutover no longer waits on M6's remaining tasks
+
+**Status: this ADR's original "Decision" section above is superseded on
+timing only** -- the cutover-mechanics steps it specifies (branch
+protection before content swap, reconcile the two no-op commits, normal
+protected-branch PR, no force-push/`enforce_admins` bypass, retire
+`v2-rust` after) are unchanged and still followed exactly.
+
+What changes: at the time of this addendum, M6's exit criterion does
+**not** fully hold -- issues #171 (macOS sandboxing) and #177 (self-update
+signature verification) are deferred (2026-09-14, see their own
+`milestones.md` entries), and #175 (Homebrew tap) had not been started.
+William directed doing the `main` cutover now rather than waiting for all
+three, so that #175's Homebrew tap can be built and its release cut
+against `main` as the branch a fresh clone actually gets, instead of
+against soon-to-be-retired `v2-rust`.
+
+Revised decision: `v2-rust` -> `main` proceeds now, on the original
+ADR-0013 mechanics. #171, #175 and #177 become tracked work against `main`
+post-cutover instead of pre-cutover gates. `milestones.md`'s M6 section is
+updated to record that its own exit-criterion wording ("sandbox on macOS
+verified" / "self-update verifies signatures" / "Homebrew tap") does not
+yet fully hold on `main` at cutover time, same as it did not hold on
+`v2-rust` before this addendum -- the cutover changes which branch that
+gap is tracked against, not whether the gap exists.
+
+Also decided at this time (see issue #4): PyPI retirement (yanking
+`0.1.x`/`0.2.0`, publishing the `0.3.0` tombstone) proceeds before the
+Homebrew tap's release cut, so the tap becomes the tombstone's documented
+successor channel from the start rather than a channel introduced before
+the old one is marked retired. PyPI's actual publish/yank steps remain
+human-only (issue #4's own note: they need the PyPI account) -- this
+session can prepare the tombstone source and retirement doc but not
+execute the PyPI-side actions itself.
