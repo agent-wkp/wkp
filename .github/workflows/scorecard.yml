@@ -29,8 +29,14 @@ on:
   # kept for the score-gate job only (see its own `if:` below), not the
   # existing publish-to-Security-tab job, which has no reason to run
   # against a PR's own transient state.
+  #
+  # Retargeted from v2-rust to main as part of the cutover itself (issue
+  # #161/PR #205): main's branch protection requires this job's check by
+  # name, and it would otherwise never post against a PR whose base is
+  # main -- the same required-check deadlock class this ADR-0013 cutover
+  # already existed to avoid for the old Python `test (3.12)` check.
   pull_request:
-    branches: [v2-rust]
+    branches: [main]
   schedule:
     - cron: "30 1 * * 6" # 01:30 UTC every Saturday
 
