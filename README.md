@@ -15,10 +15,11 @@ the tap is a separate repo). macOS process sandboxing (#171) is resolved as
 a documented limitation rather than a native mechanism (ADR-0015): running
 `wkp` directly on macOS gets the OS's ordinary per-app protections, not
 Linux's Landlock+seccomp write-restriction guarantee; an opt-in
-`--sandbox podman` flag is tracked separately (#225) for anyone who wants
-that isolation on macOS. Still open: self-update signature verification
-(#177) — see `docs/plan/milestones.md` for exactly what each milestone's
-own exit criterion holds and what's still open.
+`--sandbox podman` flag (#225, built) is available for anyone who wants
+that isolation, on macOS or Linux — see [Running sandboxed](#running-sandboxed)
+below. Still open: self-update signature verification (#177) — see
+`docs/plan/milestones.md` for exactly what each milestone's own exit
+criterion holds and what's still open.
 
 ## Install
 
@@ -75,6 +76,31 @@ agent can grant itself). See `AGENTS.md` for the full write-path walkthrough
 and every other subcommand (`traverse`, `forget`, `purge`, `sync`, `bundle`,
 `hub register`, `wkpd`). `wkp --help` also lists every subcommand from the
 CLI itself.
+
+### Running sandboxed
+
+`wkp index`/`remember`/`promote`/`forget` are Landlock+seccomp-sandboxed by
+default on Linux (design 7.5, #170) — no flag needed, filesystem writes are
+restricted to your store. macOS has no equivalent native mechanism (ADR-0015:
+Seatbelt's self-apply API is private and deprecated with no safe Rust
+wrapper, and a `sandbox-exec` re-exec is a self-invocation risk this project
+avoids on principle). If you want the same kind of isolation on macOS — or
+want it on Linux too, for a workspace you don't fully trust — `--sandbox
+podman` re-execs any subcommand inside a container instead:
+
+```bash
+wkp --sandbox podman index
+wkp --sandbox podman search "topic"
+```
+
+Needs a working `podman` on `PATH` (on macOS, a running `podman machine`).
+Pulls `ghcr.io/williamcaban/wkp:v<version>-sandbox` by default, matching your
+binary's own version; set `WKP_SANDBOX_IMAGE` to point at a different image
+(e.g. one you built locally from `deploy/Containerfile.sandbox`) instead.
+This is a different mechanism from the self-re-exec ADR-0015 rejected, not a
+mitigation of it: the container's own entrypoint invokes `wkp <command>`
+directly, once, and `--sandbox` is never passed back in — there's no
+argument sequence that leads to a second re-exec.
 
 ## Configure your coding agent
 
