@@ -132,4 +132,19 @@ fn index_succeeds_under_the_write_sandbox_against_a_real_git_repo() {
         store.path().join(".wkp/index.db").exists(),
         "index.db should exist after a successful index"
     );
+    // Not just "didn't crash" -- confirms the restriction is actually
+    // FullyEnforced on this kernel, not silently downgraded to
+    // PartiallyEnforced/NotEnforced (design 7.5's own best-effort
+    // posture means a degraded kernel wouldn't fail this test, so this
+    // assertion is the only thing that would catch a fix that merely
+    // stopped git from crashing without actually keeping full
+    // enforcement -- an earlier, wrong version of this exact fix did
+    // precisely that: passing /dev/null the full directory-capable
+    // access bundle instead of just `WriteFile` made git succeed again,
+    // but silently downgraded enforcement to `PartiallyEnforced` in the
+    // process, see `sandbox.rs`'s own doc comment on `restrict_writes_to`).
+    assert!(
+        !stderr.contains("not fully enforced"),
+        "write-sandbox should be FullyEnforced on this kernel, not degraded: {stderr}"
+    );
 }

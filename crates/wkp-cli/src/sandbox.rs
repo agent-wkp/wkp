@@ -95,6 +95,28 @@ fn denied_syscalls() -> Vec<i64> {
 /// to, and failing the whole sandbox setup over a directory this exact
 /// call is about to create would be self-defeating.
 ///
+/// A path that isn't a directory -- e.g. `/dev/null`, which `main.rs`'s
+/// `apply_write_sandbox` includes so `git`'s own startup-time
+/// `/dev/null` open doesn't get denied (issue #227) -- gets only
+/// [`landlock::AccessFs::WriteFile`], not the full directory-capable
+/// bundle `from_write` returns (`MakeDir`/`MakeReg`/etc. are
+/// meaningless for a rule anchored on a non-directory target). Checked
+/// via `is_dir()`, not `is_file()`: `/dev/null` is a character device,
+/// which `Path::is_file()` (specifically "regular file", `S_IFREG`)
+/// reports `false` for just as much as a directory would -- the
+/// distinction that actually matters here is "not a directory", the
+/// same thing the `landlock` crate's own internal narrowing checks
+/// for.
+/// This isn't just cosmetic: requesting the full bundle for a
+/// non-directory anchor still *works* (the `landlock` crate silently
+/// clips it internally to the valid subset), but that silent clip is
+/// itself what downgrades the overall ruleset from `FullyEnforced` to
+/// `PartiallyEnforced` on a kernel that would otherwise fully enforce
+/// it -- found by hand comparing the reported status before and after
+/// adding `/dev/null` with the (wrong) full bundle. Asking for exactly
+/// the access class that's actually valid for a file avoids that
+/// mismatch and keeps full enforcement.
+///
 /// Never errors just because the running kernel doesn't support
 /// Landlock at all: that shows up as [`landlock::RulesetStatus::NotEnforced`]
 /// (logged to stderr, informational), not an `Err` -- an `Err` here
@@ -106,30 +128,44 @@ fn denied_syscalls() -> Vec<i64> {
 #[cfg(target_os = "linux")]
 pub(crate) fn restrict_writes_to(allowed_write_paths: &[&Path]) -> std::io::Result<()> {
     use landlock::{
-        AccessFs, PathBeneath, PathFd, RestrictSelfAttr, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus, ABI,
+        make_bitflags, AccessFs, BitFlags, PathBeneath, PathFd, RestrictSelfAttr, Ruleset,
+        RulesetAttr, RulesetCreatedAttr, RulesetStatus, ABI,
     };
 
     let abi = ABI::V9;
-    let access_w = AccessFs::from_write(abi);
+    let access_dir = AccessFs::from_write(abi);
+    let access_file: BitFlags<AccessFs> = make_bitflags!(AccessFs::{WriteFile});
 
     let mut ruleset = Ruleset::default()
-        .handle_access(access_w)
+        .handle_access(access_dir)
         .map_err(to_io_error)?
         .create()
         .map_err(to_io_error)?;
 
     for path in allowed_write_paths {
-        let anchor: std::path::PathBuf = if path.exists() {
-            path.to_path_buf()
+        // `Path::is_file()` means "regular file" specifically (`S_IFREG`)
+        // and is false for `/dev/null` (a character device) -- the
+        // right check here is "not a directory" (matches whatever the
+        // `landlock` crate's own internal `is_file` helper checks for
+        // exactly this narrowing), not "is a regular file", or
+        // `/dev/null` would silently fall through to the full
+        // directory-capable bundle again.
+        let (anchor, access): (std::path::PathBuf, BitFlags<AccessFs>) = if path.exists() {
+            if path.is_dir() {
+                (path.to_path_buf(), access_dir)
+            } else {
+                (path.to_path_buf(), access_file)
+            }
         } else {
-            path.parent()
+            let parent = path
+                .parent()
                 .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| path.to_path_buf())
+                .unwrap_or_else(|| path.to_path_buf());
+            (parent, access_dir)
         };
         let fd = PathFd::new(&anchor).map_err(to_io_error)?;
         ruleset = ruleset
-            .add_rule(PathBeneath::new(fd, access_w))
+            .add_rule(PathBeneath::new(fd, access))
             .map_err(to_io_error)?;
     }
 
