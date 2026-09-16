@@ -84,7 +84,15 @@ jobs:
           sarif_file: results.sarif
 
   score-gate:
-    name: Scorecard minimum-score gate (M6-9, issue #178)
+    # Quoted deliberately: an unquoted ` #178)` here is parsed as a YAML
+    # comment, silently truncating the posted check-run name -- found
+    # while landing the v2-rust -> main cutover (issue #161/PR #205),
+    # where main's branch protection required this check by its full
+    # name and it could never post under the truncated string,
+    # permanently BLOCKing every PR into main. Branch protection's
+    # required-context list was already corrected to match; this is the
+    # real fix so future re-reads of this file don't get bitten again.
+    name: "Scorecard minimum-score gate (M6-9, issue #178)"
     runs-on: ubuntu-latest
     permissions:
       contents: read
