@@ -7,11 +7,11 @@ Install the new binary from one of:
 
 - [GitHub Releases](https://github.com/williamcaban/agent-wkp/releases)
   (signed archives, SBOM, and attestations)
-- Homebrew tap (coming with the rewrite's M6 milestone)
-- An OCI image (coming with the rewrite's M6 milestone)
+- Homebrew tap (in progress)
+- An OCI image, published alongside GitHub Releases
 
 The design doc for the rewrite:
-<https://github.com/williamcaban/agent-wkp/blob/v2-rust/docs/design/wkp-hub-design-v0.1.md>
+<https://github.com/williamcaban/agent-wkp/blob/main/docs/design/wkp-hub-design-v0.1.md>
 
 The last working Python implementation remains available, unmaintained, at
 the [`v0-python` tag](https://github.com/williamcaban/agent-wkp/tree/v0-python)
