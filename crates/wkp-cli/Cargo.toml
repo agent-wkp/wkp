@@ -13,7 +13,7 @@ name = "wkp"
 path = "src/main.rs"
 
 [dependencies]
-wkp-core = { version = "1.0.1", path = "../wkp-core" }
+wkp-core = { version = "1.0.2", path = "../wkp-core" }
 wkp-git = { path = "../wkp-git" }
 # M4-4: the encryption filter's own real linkage of wkp-crypto (M4-1
 # through M4-3 landed the crate itself with no consumer yet). See the
