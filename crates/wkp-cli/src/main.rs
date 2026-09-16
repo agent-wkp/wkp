@@ -45,12 +45,61 @@ fn apply_write_sandbox(store_path: &Path) {
     }
 }
 
+/// The real, current subcommand list -- printed for bare `wkp`, `wkp
+/// --help`/`-h`/`help`, and (prefixed with an "unknown subcommand"
+/// line) an unrecognized subcommand. Kept as one literal string next to
+/// `main`'s own dispatch `match` rather than generated from it, so
+/// adding a subcommand there is a visible two-line diff here too --
+/// this text drifting from the real dispatch list silently is exactly
+/// the bug class that left the old "no subcommands implemented yet"
+/// placeholder (an M0-era stub, predating every subcommand below)
+/// shipped all the way through v1.0.0/v1.0.1's real public releases.
+/// `__sandbox-self-test-*` are deliberately excluded (see their own
+/// doc comment below): internal test-only hooks, not user subcommands.
+const USAGE: &str = "\
+Usage: wkp <COMMAND> [ARGS]
+
+Commands:
+  init                   Initialize a store in the current directory
+  index                  Build or refresh the SQLite FTS5 index
+  search <query>         BM25 search over the index
+  context <query>        Search plus graph-traversal context
+  traverse <path>        Walk refs:/wikilink graph edges from one item
+  materialize --tier N   Write tier0.md/tier1.md to .wkp/
+  hooks --framework F    Print SessionStart hook text for a harness
+  remember               Write an agent-authored item to inbox/
+  promote <path>         Move an inbox/ item into the durable tree (human-signed)
+  forget                 Remove an item / rotate encryption recipients
+  purge <path>           Erase a path from git history (wraps git-filter-repo)
+  sync [status]          Sync with configured remotes / report conflicts
+  bundle export|import   Air-gapped sync via git bundle
+  import                 Import ~/.claude/projects, CLAUDE.md, AGENTS.md
+  merge-driver           Git merge-driver plumbing (registered by init)
+  filter clean|smudge    Git clean/smudge filter plumbing (registered by init)
+  resolve-conflicts      Resolve a modify/delete conflict pair
+  hub register           Register this device with a wkp-hub
+  wkpd                   Watch-triggered sync daemon
+
+  --version, -V          Print the version and exit
+  --help, -h, help       Print this message and exit
+
+See AGENTS.md for how an agent should use these, or docs/plan/milestones.md
+for what each one's own acceptance criteria are.\
+";
+
 fn main() {
     // Dispatching on a CLI flag, not a security-sensitive use of argv.
     let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args
     let command = args.next();
 
     match command.as_deref() {
+        None => {
+            eprintln!("{USAGE}");
+            std::process::exit(1);
+        }
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+        }
         Some("--version" | "-V") => {
             println!("wkp {}", env!("CARGO_PKG_VERSION"));
         }
@@ -572,12 +621,9 @@ fn main() {
             println!("ORDINARY_WRITE_OK={ordinary_write_ok}");
             std::process::exit(if ordinary_write_ok { 0 } else { 1 });
         }
-        _ => {
-            if let Err(msg) = wkp_git::ensure_min_git_version() {
-                eprintln!("{msg}");
-                std::process::exit(1);
-            }
-            eprintln!("wkp: no subcommands implemented yet (see docs/plan/milestones.md)");
+        Some(unknown) => {
+            eprintln!("wkp: unknown subcommand '{unknown}'\n");
+            eprintln!("{USAGE}");
             std::process::exit(1);
         }
     }
