@@ -44,15 +44,112 @@ yet.
   the authoritative design.
 - [`docs/plan/milestones.md`](docs/plan/milestones.md) — milestones and
   per-milestone task lists.
-- [`AGENTS.md`](AGENTS.md) — how an agent uses the `wkp` CLI.
+- [`AGENTS.md`](AGENTS.md) — how an agent uses the `wkp` CLI (the full
+  command reference; this README only covers the basics for a human
+  setting things up).
 
-## The previous Python implementation
+## Usage
+
+```bash
+cd your-workspace
+wkp init                 # creates .wkp/, git-signing config, a one-time
+                          # import of any CLAUDE.md/AGENTS.md/harness memory
+wkp index                # builds the SQLite FTS5 index from your .md files
+
+wkp search "topic" --tier 2 --budget 6000   # BM25 search
+wkp context "topic" --tier 2 --budget 8000  # search + linked-neighbor graph
+wkp materialize --tier 0                    # writes .wkp/tier0.md
+```
+
+`wkp remember`/`wkp promote` are the write path — an agent writes proposed
+memory to `inbox/` with `wkp remember` (SSH-signed, never trusted until a
+human runs `wkp promote` on it); see `AGENTS.md` for the full write-path
+walkthrough and every other subcommand (`traverse`, `forget`, `purge`,
+`sync`, `bundle`, `hub register`, `wkpd`). `wkp --help` also lists every
+subcommand from the CLI itself.
+
+## Configure your coding agent
+
+WKP's contract with a harness is deliberately minimal (design 1.2's
+"harness neutrality" goal): `wkp` on `PATH`, something that runs a shell
+command at session start, and stdout. No client library, no MCP tool
+quota, no daemon.
+
+### Claude Code
+
+```bash
+wkp hooks --framework claude_code
+```
+
+prints the exact JSON to merge into `.claude/settings.local.json` (or
+`.claude/settings.json` for a team-shared setting) under its `hooks` key.
+It wires a `SessionStart` hook that quietly re-indexes and then `cat`s
+`.wkp/tier0.md`, so Tier 0 is already in context before your first message
+— no manual step needed after that.
+
+### Codex, OpenCode, and other AGENTS.md-reading harnesses
+
+`wkp hooks` only has a renderer for Claude Code's specific hook format
+today (issue tracked in `docs/plan/milestones.md`) — Codex and OpenCode
+don't have a dedicated `wkp hooks --framework` target yet. Both read a
+project's `AGENTS.md` automatically, though, so the working equivalent is
+adding a short instruction there:
+
+```markdown
+## WKP memory
+Before starting work, run `wkp materialize --tier 0 && cat .wkp/tier0.md`
+and treat its output as already-established project context.
+```
+
+This is the same underlying mechanism (run a command, read stdout) just
+triggered by the harness's own AGENTS.md-reading convention instead of a
+dedicated hook API. Any harness that can run a shell command and read a
+file can participate the same way (design 1.2's harness-neutrality goal)
+— swap in whatever your harness's own "run this at the start of a
+session/task" mechanism is.
+
+## Migrating from the Python version
 
 The original Python `agent-wkp` (progressive-disclosure knowledge index with
 BM25/semantic search over SQLite) is frozen at the [`v0-python`
 tag](https://github.com/williamcaban/agent-wkp/tree/v0-python) and on the
-`main` branch's history. It is not maintained going forward; this rewrite
-supersedes it.
+`main` branch's history before the M0-4 cutover. It is not maintained going
+forward; this rewrite supersedes it. The PyPI package (`pip
+install agent-wkp`) now resolves to a `0.3.0` tombstone release that prints
+a retirement message and exits — it carries no functionality (see
+`docs/plan/pypi-retirement.md`).
+
+**1. Remove the old package**, if you had it installed:
+
+```bash
+pip uninstall agent-wkp        # or: pipx uninstall agent-wkp
+```
+
+**2. Install the new binary** — see [Install](#install) above.
+
+**3. Clean and reinitialize each workspace's knowledge structures.** Both
+versions use the same `.wkp/` directory convention, but the Rust version's
+SQLite index has a different schema (FTS5, not the Python version's own
+tables) — the old `.wkp/index.db` isn't readable by the new binary. Every
+file under `.wkp/` is derived, gitignored, device-local state, never the
+source of truth, so it's always safe to delete and regenerate:
+
+```bash
+cd your-workspace
+rm -rf .wkp
+wkp init
+wkp index
+```
+
+Your actual memory — the markdown files with OKF frontmatter that `.wkp/`
+was derived from — is untouched by this; only the derived index and
+materialized tier files get rebuilt. The new parser tolerates the old
+version's simpler frontmatter (M1's own acceptance criteria: "tolerant of
+missing or malformed frontmatter"), so existing files don't need hand
+editing to be re-indexed, though the v2 fields (`scope`, `provenance`,
+`confidence`, `expires`) described in the design doc are only populated
+going forward by `wkp remember`/`wkp promote`, not retroactively inferred
+for old content.
 
 ## License
 
