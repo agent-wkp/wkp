@@ -62,11 +62,15 @@ wkp materialize --tier 0                    # writes .wkp/tier0.md
 ```
 
 `wkp remember`/`wkp promote` are the write path — an agent writes proposed
-memory to `inbox/` with `wkp remember` (SSH-signed, never trusted until a
-human runs `wkp promote` on it); see `AGENTS.md` for the full write-path
-walkthrough and every other subcommand (`traverse`, `forget`, `purge`,
-`sync`, `bundle`, `hub register`, `wkpd`). `wkp --help` also lists every
-subcommand from the CLI itself.
+memory to `inbox/` with `wkp remember` (SSH-signed). `wkp promote` moves it
+into the durable tree, and normally requires a human-signed commit; the one
+opt-in exception is a principal explicitly listed under `[promote] auto =
+[...]` in `.wkp/config.toml` (design 7.4's documented, not-default escape
+hatch for a specific trusted harness/agent identity — not a default any
+agent can grant itself). See `AGENTS.md` for the full write-path walkthrough
+and every other subcommand (`traverse`, `forget`, `purge`, `sync`, `bundle`,
+`hub register`, `wkpd`). `wkp --help` also lists every subcommand from the
+CLI itself.
 
 ## Configure your coding agent
 
@@ -97,7 +101,8 @@ adding a short instruction there:
 
 ```markdown
 ## WKP memory
-Before starting work, run `wkp materialize --tier 0 && cat .wkp/tier0.md`
+Before starting work, run
+`wkp index && wkp materialize --tier 0 && cat .wkp/tier0.md`
 and treat its output as already-established project context.
 ```
 
@@ -130,13 +135,16 @@ pip uninstall agent-wkp        # or: pipx uninstall agent-wkp
 **3. Clean and reinitialize each workspace's knowledge structures.** Both
 versions use the same `.wkp/` directory convention, but the Rust version's
 SQLite index has a different schema (FTS5, not the Python version's own
-tables) — the old `.wkp/index.db` isn't readable by the new binary. Every
-file under `.wkp/` is derived, gitignored, device-local state, never the
-source of truth, so it's always safe to delete and regenerate:
+tables) — the old `.wkp/index.db` isn't readable by the new binary. Remove
+only the derived files (index, materialized tiers, device identity), not
+the whole directory: `.wkp/config.toml`, if you've set one up, carries real
+configuration (e.g. `[promote] auto = [...]`, an opt-in auto-promote
+allowlist) rather than derived state, and deleting it would silently lose
+that setting.
 
 ```bash
 cd your-workspace
-rm -rf .wkp
+rm -f .wkp/index.db .wkp/tier*.md .wkp/device-id .wkp/device-identity
 wkp init
 wkp index
 ```
