@@ -24,7 +24,7 @@ classifiers = [
 [project.urls]
 Homepage      = "https://github.com/williamcaban/agent-wkp"
 Repository    = "https://github.com/williamcaban/agent-wkp"
-"Design doc"  = "https://github.com/williamcaban/agent-wkp/blob/v2-rust/docs/design/wkp-hub-design-v0.1.md"
+"Design doc"  = "https://github.com/williamcaban/agent-wkp/blob/main/docs/design/wkp-hub-design-v0.1.md"
 Releases      = "https://github.com/williamcaban/agent-wkp/releases"
 
 [project.scripts]
