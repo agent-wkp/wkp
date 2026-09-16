@@ -149,7 +149,7 @@ jobs:
           fi
           cat "$OUT/wkp.sha256"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wkp-${{ matrix.target }}-attempt${{ matrix.attempt }}
           path: wkp-${{ matrix.target }}/
@@ -196,7 +196,7 @@ jobs:
       # and `publish-draft-release` below downloads by a `wkp-*` glob.
       # A shared prefix would let it silently pull in an *unverified*
       # attempt instead of this job's own hash-checked one.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-wkp-${{ matrix.target }}
           path: attempt1/
@@ -262,7 +262,7 @@ jobs:
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             artifact/wkp
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: signed-wkp-${{ matrix.target }}
           path: wkp-${{ matrix.target }}.bundle
