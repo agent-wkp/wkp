@@ -80,3 +80,56 @@ fn syscall_filter_leaves_ordinary_operations_working() {
         "stdout={stdout:?}"
     );
 }
+
+/// Regression test for a real bug the two tests above couldn't catch:
+/// both only ever drive the hidden `__sandbox-self-test-*` subcommands,
+/// neither of which spawns a real `git` subprocess. `wkp index` does,
+/// via `wkp-git`, immediately after `apply_write_sandbox` runs -- and
+/// on a kernel that actually enforces the restriction, every one of
+/// those `git` calls used to die with "could not open '/dev/null' for
+/// reading and writing" (git's own startup-time `sanitize_stdfds()`
+/// opens `/dev/null` read+write unconditionally, regardless of
+/// subcommand, and that path was outside the allowed set). Fixed by
+/// including `/dev/null` in `apply_write_sandbox`'s allowed paths (see
+/// its own doc comment in `main.rs`) -- this test exercises the real
+/// compiled binary's real `index` subcommand against a real git repo,
+/// the actual path that was broken, not just the sandbox primitives in
+/// isolation.
+#[test]
+fn index_succeeds_under_the_write_sandbox_against_a_real_git_repo() {
+    let store = tempfile::tempdir().expect("tempdir");
+
+    let init = Command::new(wkp_bin())
+        .arg("init")
+        .arg(store.path())
+        .output()
+        .expect("run wkp init");
+    assert!(
+        init.status.success(),
+        "wkp init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    std::fs::create_dir_all(store.path().join("projects/demo")).expect("mkdir");
+    std::fs::write(
+        store.path().join("projects/demo/note.md"),
+        "---\ntype: instruction\nscope: project\n---\nkeyword: zephyr\n",
+    )
+    .expect("write fixture note");
+
+    let index = Command::new(wkp_bin())
+        .arg("index")
+        .arg(store.path())
+        .output()
+        .expect("run wkp index");
+    let stderr = String::from_utf8_lossy(&index.stderr);
+    assert!(
+        index.status.success(),
+        "wkp index failed under the write sandbox (this is exactly the /dev/null \
+         regression): {stderr}"
+    );
+    assert!(
+        store.path().join(".wkp/index.db").exists(),
+        "index.db should exist after a successful index"
+    );
+}

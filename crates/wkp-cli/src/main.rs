@@ -30,17 +30,36 @@ mod wkpd;
 mod test_support;
 
 /// M6-1 (issue #170, design 7.5): restricts write-class filesystem
-/// access to `store_path` before a write-heavy subcommand does any
-/// real I/O. Non-fatal on error -- an actual `Err` here (not the
-/// already-handled "kernel doesn't support Landlock" case, which
-/// `sandbox::restrict_writes_to` itself logs and treats as success)
-/// means the sandbox setup itself hit something unexpected; failing
-/// the whole command over a brand-new hardening layer would trade a
-/// real functional regression for a marginal, unproven security gain,
-/// backwards from design 7.5's own "hardening, not a hard requirement"
-/// framing.
+/// access to `store_path` (plus `/dev/null`, see below) before a
+/// write-heavy subcommand does any real I/O. Non-fatal on error -- an
+/// actual `Err` here (not the already-handled "kernel doesn't support
+/// Landlock" case, which `sandbox::restrict_writes_to` itself logs and
+/// treats as success) means the sandbox setup itself hit something
+/// unexpected; failing the whole command over a brand-new hardening
+/// layer would trade a real functional regression for a marginal,
+/// unproven security gain, backwards from design 7.5's own "hardening,
+/// not a hard requirement" framing.
+///
+/// `/dev/null` has to be in the allowed list, not just `store_path`:
+/// found by hand (this restriction had never actually been exercised
+/// against a real `git` subprocess before -- `sandbox_integration.rs`'s
+/// own tests only ever drove the two hidden self-test subcommands,
+/// neither of which spawns `git`). Every `git` invocation, regardless
+/// of subcommand -- even a pure read like `git ls-files` -- opens
+/// `/dev/null` with read+write access during its own startup
+/// (`sanitize_stdfds()`, filling any of its own fds 0/1/2 that aren't
+/// already open valid descriptors), and dies with "could not open
+/// '/dev/null' for reading and writing" if that's denied. Without this,
+/// the write-sandbox didn't harden `wkp index`/`remember`/`promote`/
+/// `forget` -- it broke all of them outright on any kernel actually
+/// enforcing it, since `wkp-git`'s every real subprocess call runs
+/// after this restriction is applied. `/dev/null` carries no
+/// interesting write-access security property of its own (writes to it
+/// are already discarded), so allowing it doesn't meaningfully weaken
+/// the restriction's real intent -- confining writes to files that
+/// matter.
 fn apply_write_sandbox(store_path: &Path) {
-    if let Err(e) = sandbox::restrict_writes_to(&[store_path]) {
+    if let Err(e) = sandbox::restrict_writes_to(&[store_path, Path::new("/dev/null")]) {
         eprintln!("wkp: write-sandbox setup failed, continuing without it: {e}");
     }
 }
