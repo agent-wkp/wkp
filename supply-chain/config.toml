@@ -277,12 +277,30 @@ criteria = "safe-to-deploy"
 version = "4.1.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.curve25519-dalek]]
+version = "5.0.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
+
 [[exemptions.curve25519-dalek-derive]]
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.data-encoding]]
 version = "2.11.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.der]]
+version = "0.8.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.der-parser]]
@@ -313,9 +331,37 @@ criteria = "safe-to-deploy"
 version = "2.2.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.ed25519]]
+version = "3.0.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
+
 [[exemptions.ed25519-dalek]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.ed25519-dalek]]
+version = "3.0.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
 
 [[exemptions.either]]
 version = "1.18.0"
@@ -356,6 +402,20 @@ criteria = "safe-to-deploy"
 [[exemptions.fiat-crypto]]
 version = "0.2.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.fiat-crypto]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
 
 [[exemptions.find-crate]]
 version = "0.6.3"
@@ -824,6 +884,20 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.pkcs8]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
+
 [[exemptions.polling]]
 version = "3.11.0"
 criteria = "safe-to-deploy"
@@ -1059,6 +1133,20 @@ criteria = "safe-to-deploy"
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.signature]]
+version = "3.0.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
+
 [[exemptions.simd-adler32]]
 version = "0.3.10"
 criteria = "safe-to-deploy"
@@ -1082,6 +1170,20 @@ criteria = "safe-to-deploy"
 [[exemptions.spki]]
 version = "0.7.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.spki]]
+version = "0.8.0"
+criteria = "safe-to-deploy"
+notes = """
+Coexists with an older version of this crate still in the tree: ssh-key
+pins ed25519-dalek ^2.2.0 (pulling in this crate's own older-version
+line transitively), while wkp-crypto's direct ed25519-dalek dependency
+was bumped to 3.0.0 (PR #208, M5-9's CSR/PKCS#8 support), pulling in
+this newer version. Two major versions of a crypto-adjacent crate
+linked into the same binary -- not unsafe (no shared state between the
+two call sites), but a real tradeoff a human should read before merging
+the bump that introduced it.
+"""
 
 [[exemptions.ssh-cipher]]
 version = "0.2.0"

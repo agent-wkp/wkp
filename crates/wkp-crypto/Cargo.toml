@@ -38,7 +38,12 @@ ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core"] }
 # into the PKCS#8 form `rcgen::KeyPair::from_pkcs8_der_and_sign_algo`
 # requires -- no second keypair, no new key material, just a different
 # encoding of the identical key `public_key_openssh` already exposes.
-ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
+# `alloc` needed explicitly as of 3.0 (found bumping from 2.2.0, PR
+# #208/dependabot): the underlying `ed25519` crate's `pkcs8` re-export
+# of `EncodePrivateKey`/`EncodePublicKey` moved behind its own `alloc`
+# feature, which `ed25519-dalek`'s `pkcs8` feature no longer forwards
+# on its own -- 2.2.0 didn't need this listed separately.
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8", "alloc"] }
 # `default-features = false` + `ring`: pin the crypto provider to
 # `ring`, matching `wkp-hub`'s own `rcgen`/`rustls` entries (see
 # `crates/wkp-hub/Cargo.toml`'s comment on why -- avoiding a future
