@@ -11,10 +11,14 @@ done: Linux Landlock/seccomp sandboxing, cosign-signed reproducible
 releases with SLSA provenance and SBOM, and an enforcing OpenSSF Scorecard
 gate all exist and are exercised in CI, plus a Homebrew tap (#175, validated
 by hand against a real install -- not itself part of this repo's CI, since
-the tap is a separate repo). Still open: macOS process sandboxing (#171)
-and self-update signature verification (#177) — see
-`docs/plan/milestones.md` for exactly what each milestone's own exit
-criterion holds and what's still open.
+the tap is a separate repo). macOS process sandboxing (#171) is resolved as
+a documented limitation rather than a native mechanism (ADR-0015): running
+`wkp` directly on macOS gets the OS's ordinary per-app protections, not
+Linux's Landlock+seccomp write-restriction guarantee; an opt-in
+`--sandbox podman` flag is tracked separately (#225) for anyone who wants
+that isolation on macOS. Still open: self-update signature verification
+(#177) — see `docs/plan/milestones.md` for exactly what each milestone's
+own exit criterion holds and what's still open.
 
 ## Install
 
