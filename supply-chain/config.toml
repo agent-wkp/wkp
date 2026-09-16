@@ -1054,7 +1054,7 @@ version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.seccompiler]]
-version = "0.4.0"
+version = "0.5.0"
 criteria = "safe-to-deploy"
 notes = """
 NOT independently line-by-line audited by the agent that added this
@@ -1071,6 +1071,16 @@ of a full audit of the crate's ~5800-line diff. This exemption substitutes
 for the "safe-to-deploy" review CODEOWNERS calls for on sandbox-rule changes
 (CLAUDE.md's non-negotiable priority 2) and should be replaced with a real
 `cargo vet certify` by a human reviewer before being treated as durable.
+
+Re-checked on the 0.4.0 -> 0.5.0 bump (dependabot, PR #209): `SeccompFilter`'s
+field order and public `new()` signature (rules, mismatch_action,
+match_action, target_arch) are unchanged, and the crate's own doc example
+still pairs mismatch_action with the catch-all/deny-unlisted role the same
+way -- `wkp-cli`'s call site (`Allow` for mismatch_action, `Errno` for
+match_action) preserves the same deny-by-default semantics this note's
+original empirical check established. Not a full re-audit of the ~590-line
+diff, just confirmation the one security-critical parameter-order question
+didn't shift.
 """
 
 [[exemptions.secrecy]]

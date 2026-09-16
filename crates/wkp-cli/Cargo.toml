@@ -63,7 +63,7 @@ tempfile = "3.27.0"
 # the macOS build (`aarch64-apple-darwin`) never compiles either crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
-seccompiler = "0.4"
+seccompiler = "0.5"
 libc = "0.2"
 
 [features]
