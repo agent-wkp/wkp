@@ -22,7 +22,7 @@ harness = false
 [dependencies]
 regex = "1.13.1"
 ureq = { version = "3.4.1", default-features = false, optional = true, features = ["rustls"] }
-wkp-sys = { version = "0.1.0", path = "../wkp-sys" }
+wkp-sys = { version = "1.0.1", path = "../wkp-sys" }
 
 [features]
 # M1-9: opt-in hybrid search (design 5.3's "remains available... but only
