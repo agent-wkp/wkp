@@ -30,7 +30,7 @@ Each milestone has an exit criterion that is observable, not a checklist of file
 3. Change detection via `git update-index --refresh` + `git status --porcelain=v2`, fsmonitor when available; hash only changed files.
 4. `wkp search` with BM25, tier and budget filters, `--format paths|text|json`; cold-start budget enforced by bench.
 5. `wkp context` and `wkp traverse` parity with the Python behavior (graph edges from `refs:` and wikilinks).
-6. `wkp materialize --tier 0|1` with atomic write; `wkp hooks --framework claude_code` prints hook text only.
+6. `wkp materialize --tier 0|1` with atomic write; `wkp hooks --framework claude_code` prints hook text only. **Extended 2026-09-17** (William, real usability report -- `wkp hooks --framework codex` errored with no pointer to the actual workaround): `--framework` now also accepts `codex`/`opencode`/`hermes`/`agents_md`, all four printing the same plain-text `AGENTS.md` instruction (the mechanism documented in README's own "Configure your coding agent" section, now generated instead of hand-copied). `hermes` support is backed by a real finding, not a guess: verified against Hermes Agent's own source (`agent/prompt_builder.py`, `NousResearch/hermes-agent`) that it reads `AGENTS.md` automatically too, with one caveat (a project's own `.hermes.md`/`HERMES.md` takes precedence over `AGENTS.md` for Hermes specifically) -- design 10's harness-adapter table updated to match, replacing its prior **[unverified]** note for Hermes.
 7. Importer for `~/.claude/projects/*/memory/`, `CLAUDE.md`, `AGENTS.md` tagged `source: import`.
 8. Golden tests for `tier0.md` output; rewrite `AGENTS.md` for the v2 CLI.
 9. Optional hybrid search via `--embed-url` with RRF and BM25 fallback, kept out of the default path.
