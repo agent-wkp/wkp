@@ -568,7 +568,8 @@ The core contract is: a hook that runs `wkp index --quiet && cat "$(wkp path tie
 |---|---|---|---|
 | Claude Code | `SessionStart` hook, `UserPromptSubmit` for hot files | Bash | Existing adapter; `wkp hooks --framework claude_code` |
 | OpenCode | `AGENTS.md` include of the materialized Tier 0 file plus plugin hook where available | Bash | **[unverified]** exact hook API; validate against OpenCode docs before implementation |
-| Hermes Agent, dsh | Startup command or system-prompt file include | Bash | **[unverified]** integration surfaces; I do not have primary documentation for either at hand |
+| Hermes Agent | `AGENTS.md` auto-read (one of four project-context sources it checks, first match wins: `.hermes.md`/`HERMES.md` > `AGENTS.md` chain > `CLAUDE.md` > `.cursorrules`) | Bash | **Verified 2026-09-17** against its own source (`agent/prompt_builder.py`, `NousResearch/hermes-agent`) -- `wkp hooks --framework hermes`. A project with its own `.hermes.md`/`HERMES.md` shadows `AGENTS.md` for Hermes specifically, not for Codex/OpenCode. |
+| dsh | Startup command or system-prompt file include | Bash | **[unverified]** integration surface; no primary documentation at hand |
 | Any harness with MCP but no hooks | Optional stdio MCP server built into the same binary (`wkp mcp`) | MCP tools | Costs tool-definition tokens per session; offered as fallback only |
 | Harness in a container | Mount store + optional `wkpd` socket | Bash | No ports |
 

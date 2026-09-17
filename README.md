@@ -121,13 +121,19 @@ It wires a `SessionStart` hook that quietly re-indexes and then `cat`s
 `.wkp/tier0.md`, so Tier 0 is already in context before your first message
 — no manual step needed after that.
 
-### Codex, OpenCode, and other AGENTS.md-reading harnesses
+### Codex, OpenCode, Hermes, and other AGENTS.md-reading harnesses
 
-`wkp hooks` only has a renderer for Claude Code's specific hook format
-today (issue tracked in `docs/plan/milestones.md`) — Codex and OpenCode
-don't have a dedicated `wkp hooks --framework` target yet. Both read a
-project's `AGENTS.md` automatically, though, so the working equivalent is
-adding a short instruction there:
+These don't have a dedicated hook API the way Claude Code does, but Codex,
+OpenCode, and Hermes Agent are all confirmed to read a project's
+`AGENTS.md` automatically, so the equivalent is adding a short instruction
+there:
+
+```bash
+wkp hooks --framework codex   >> AGENTS.md   # or: opencode, hermes, agents_md
+```
+
+Prints (and, with `>>`, appends) the exact same text regardless of which
+of those four you pass:
 
 ```markdown
 ## WKP memory
@@ -136,12 +142,22 @@ Before starting work, run
 and treat its output as already-established project context.
 ```
 
+One caveat specific to Hermes, verified against its own source
+(`agent/prompt_builder.py`, `NousResearch/hermes-agent`): it loads at most
+one project-context file, first match wins, in this order —
+`.hermes.md`/`HERMES.md` (walking up to the git root), then the
+`AGENTS.md` chain, then `CLAUDE.md`, then `.cursorrules`. So `AGENTS.md`
+reaches Hermes exactly like it reaches Codex/OpenCode *unless* the project
+also has its own `.hermes.md`/`HERMES.md`, which wins instead.
+
 This is the same underlying mechanism (run a command, read stdout) just
 triggered by the harness's own AGENTS.md-reading convention instead of a
 dedicated hook API. Any harness that can run a shell command and read a
 file can participate the same way (design 1.2's harness-neutrality goal)
-— swap in whatever your harness's own "run this at the start of a
-session/task" mechanism is.
+— `--framework agents_md` is the generic name for this if yours isn't
+Codex, OpenCode, or Hermes specifically; swap in whatever your harness's
+own "run this at the start of a session/task" mechanism is if it isn't
+`AGENTS.md`-based at all.
 
 ## Migrating from the Python version
 
