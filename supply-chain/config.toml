@@ -1360,11 +1360,11 @@ version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq]]
-version = "3.4.1"
+version = "3.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq-proto]]
-version = "0.6.2"
+version = "0.6.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.url]]
