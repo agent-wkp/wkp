@@ -153,7 +153,17 @@ Do **not** call `wkp search` for every message — only when you genuinely need 
 
 ## Writing memory
 
-There is no `wkp remember` yet (M2). Until then, do not hand-edit files outside `inbox/` and do not hand-write `confidence:` as anything other than `proposed` — Tier 0 and Tier 1 promotion is a human decision made through a signed commit, not something an agent or import step can do to itself. If you write a markdown file to record something learned mid-session, put it under `inbox/` with `confidence: proposed` and let a human promote it later.
+`wkp remember` writes one item to `inbox/`, SSH-signed under your own principal:
+
+```bash
+wkp remember --type knowledge --principal agent:claude --signing-key-file ~/.ssh/id_ed25519 <<'EOF'
+Whatever you learned, as plain markdown body content.
+EOF
+```
+
+Content is always read from stdin, never argv — pipe or heredoc it, don't pass it as a flag. `--type` is required (`knowledge`, `feedback`, `project-state`, or `instruction`); `--scope`, `--title`, and `--session` are optional. Every item this writes gets `confidence: proposed` and `provenance.source: conversation` unconditionally, regardless of `--type` — it always lands in `inbox/` at tier 2, never tier 0/1, no matter what type you give it.
+
+Do not hand-edit files outside `inbox/`, and do not hand-write `confidence:` as anything other than `proposed` on anything you write yourself. Tier 0 and Tier 1 promotion (`wkp promote`) requires a human-signed commit — it is not something an agent principal can do to itself, with one documented, not-default exception (an operator explicitly listing your principal under `[promote] auto = [...]` in `.wkp/config.toml`; if that's not configured, don't attempt `wkp promote` yourself).
 
 ## Storage locations
 

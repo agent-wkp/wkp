@@ -572,7 +572,7 @@ The core contract is: a hook that runs `wkp index --quiet && cat "$(wkp path tie
 | Any harness with MCP but no hooks | Optional stdio MCP server built into the same binary (`wkp mcp`) | MCP tools | Costs tool-definition tokens per session; offered as fallback only |
 | Harness in a container | Mount store + optional `wkpd` socket | Bash | No ports |
 
-Memory writes from a harness use `wkp remember --actor agent:<harness> --session <id> <<EOF ... EOF` (stdin, never argv), which lands in `inbox/` under the provenance rules in 7.4. Importers for existing harness memory formats (`~/.claude/projects/*/memory/`, `CLAUDE.md`, `AGENTS.md`) run once at `wkp init` and tag imported items with `source: import`.
+Memory writes from a harness use `wkp remember --type <type> --principal agent:<harness> --signing-key-file <path> --session <id> <<EOF ... EOF` (stdin, never argv), which lands in `inbox/` under the provenance rules in 7.4. **[Corrected 2026-09-17: the implemented flag is `--principal`, not `--actor` as originally written here, and `--type`/`--signing-key-file` are also required, not shown in the original example — AGENTS.md's own "Writing memory" section carries the accurate, up-to-date version.]** Importers for existing harness memory formats (`~/.claude/projects/*/memory/`, `CLAUDE.md`, `AGENTS.md`) run once at `wkp init` and tag imported items with `source: import`.
 
 ---
 
