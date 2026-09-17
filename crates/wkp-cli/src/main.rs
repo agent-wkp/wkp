@@ -17,6 +17,7 @@ mod index_cmd;
 mod init;
 mod materialize;
 mod merge_driver;
+mod podman_sandbox;
 mod promote;
 mod purge;
 mod remember;
@@ -30,17 +31,36 @@ mod wkpd;
 mod test_support;
 
 /// M6-1 (issue #170, design 7.5): restricts write-class filesystem
-/// access to `store_path` before a write-heavy subcommand does any
-/// real I/O. Non-fatal on error -- an actual `Err` here (not the
-/// already-handled "kernel doesn't support Landlock" case, which
-/// `sandbox::restrict_writes_to` itself logs and treats as success)
-/// means the sandbox setup itself hit something unexpected; failing
-/// the whole command over a brand-new hardening layer would trade a
-/// real functional regression for a marginal, unproven security gain,
-/// backwards from design 7.5's own "hardening, not a hard requirement"
-/// framing.
+/// access to `store_path` (plus `/dev/null`, see below) before a
+/// write-heavy subcommand does any real I/O. Non-fatal on error -- an
+/// actual `Err` here (not the already-handled "kernel doesn't support
+/// Landlock" case, which `sandbox::restrict_writes_to` itself logs and
+/// treats as success) means the sandbox setup itself hit something
+/// unexpected; failing the whole command over a brand-new hardening
+/// layer would trade a real functional regression for a marginal,
+/// unproven security gain, backwards from design 7.5's own "hardening,
+/// not a hard requirement" framing.
+///
+/// `/dev/null` has to be in the allowed list, not just `store_path`:
+/// found by hand (this restriction had never actually been exercised
+/// against a real `git` subprocess before -- `sandbox_integration.rs`'s
+/// own tests only ever drove the two hidden self-test subcommands,
+/// neither of which spawns `git`). Every `git` invocation, regardless
+/// of subcommand -- even a pure read like `git ls-files` -- opens
+/// `/dev/null` with read+write access during its own startup
+/// (`sanitize_stdfds()`, filling any of its own fds 0/1/2 that aren't
+/// already open valid descriptors), and dies with "could not open
+/// '/dev/null' for reading and writing" if that's denied. Without this,
+/// the write-sandbox didn't harden `wkp index`/`remember`/`promote`/
+/// `forget` -- it broke all of them outright on any kernel actually
+/// enforcing it, since `wkp-git`'s every real subprocess call runs
+/// after this restriction is applied. `/dev/null` carries no
+/// interesting write-access security property of its own (writes to it
+/// are already discarded), so allowing it doesn't meaningfully weaken
+/// the restriction's real intent -- confining writes to files that
+/// matter.
 fn apply_write_sandbox(store_path: &Path) {
-    if let Err(e) = sandbox::restrict_writes_to(&[store_path]) {
+    if let Err(e) = sandbox::restrict_writes_to(&[store_path, Path::new("/dev/null")]) {
         eprintln!("wkp: write-sandbox setup failed, continuing without it: {e}");
     }
 }
@@ -83,6 +103,10 @@ Commands:
   --version, -V          Print the version and exit
   --help, -h, help       Print this message and exit
 
+  --sandbox <backend> <COMMAND> [ARGS]
+                         Run COMMAND inside a container instead of
+                         natively (ADR-0015). Backends: podman.
+
 See AGENTS.md for how an agent should use these, or docs/plan/milestones.md
 for what each one's own acceptance criteria are.\
 ";
@@ -90,8 +114,43 @@ for what each one's own acceptance criteria are.\
 fn main() {
     // Dispatching on a CLI flag, not a security-sensitive use of argv.
     let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args
-    let command = args.next();
+    let first = args.next();
 
+    // `--sandbox <backend> <COMMAND> [ARGS]` is handled before the
+    // ordinary subcommand dispatch below: it isn't a subcommand itself,
+    // it's a modifier that re-execs whatever subcommand follows it
+    // inside a container (`podman_sandbox::run`). Checked here, first,
+    // since it must consume two tokens (the flag and its backend)
+    // before the real subcommand name is even reached.
+    if first.as_deref() == Some("--sandbox") {
+        let backend = args.next();
+        match backend.as_deref() {
+            Some("podman") => {
+                let remaining: Vec<String> = args.collect();
+                if remaining.is_empty() {
+                    eprintln!("wkp: --sandbox podman requires a command, e.g. `wkp --sandbox podman index`");
+                    std::process::exit(1);
+                }
+                match podman_sandbox::run(&remaining) {
+                    Ok(code) => std::process::exit(code),
+                    Err(msg) => {
+                        eprintln!("wkp: --sandbox podman failed: {msg}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(other) => {
+                eprintln!("wkp: unknown --sandbox backend '{other}' (supported: podman)");
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("wkp: --sandbox requires a backend, e.g. `wkp --sandbox podman index`");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let command = first;
     match command.as_deref() {
         None => {
             eprintln!("{USAGE}");
