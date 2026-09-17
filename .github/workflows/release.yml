@@ -456,10 +456,20 @@ jobs:
           mkdir -p "${HOME}/.docker"
           echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin --authfile "${HOME}/.docker/config.json"
 
+      # `TAG` via `env:`, not `${{ github.ref_name }}` interpolated
+      # straight into the shell script: a git tag name can contain
+      # shell metacharacters (`v$(...)`  is a valid ref name), and
+      # GitHub expands `${{ }}` as raw text substitution before the
+      # shell ever runs -- caught on review (CodeRabbit/zizmor,
+      # CWE-78 template injection). Routing it through `env:` and
+      # referencing `"$TAG"` means the shell sees it as an ordinary
+      # variable value, never as script text to execute.
       - name: podman manifest push
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           podman manifest push --digestfile digest.txt \
-            wkp-manifest "docker://${{ steps.image.outputs.image }}:${{ github.ref_name }}"
+            wkp-manifest "docker://${{ steps.image.outputs.image }}:${TAG}"
           echo "digest=$(cat digest.txt)" >> "$GITHUB_OUTPUT"
         id: push
 
@@ -529,10 +539,15 @@ jobs:
           mkdir -p "${HOME}/.docker"
           echo "${{ github.token }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin --authfile "${HOME}/.docker/config.json"
 
+      # See the oci-image job's own comment on its equivalent step for
+      # why TAG goes through env: rather than being interpolated
+      # straight into the shell script.
       - name: podman manifest push
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           podman manifest push --digestfile digest.txt \
-            wkp-sandbox-manifest "docker://${{ steps.image.outputs.image }}:${{ github.ref_name }}-sandbox"
+            wkp-sandbox-manifest "docker://${{ steps.image.outputs.image }}:${TAG}-sandbox"
           echo "digest=$(cat digest.txt)" >> "$GITHUB_OUTPUT"
         id: push
 
@@ -596,10 +611,16 @@ jobs:
       # sandboxing/Scorecard gate are separate, still-open tasks). A
       # human decides when a draft here actually gets published for
       # real.
+      # TAG via env:, same reasoning as the oci-image/oci-image-sandbox
+      # jobs' own manifest-push steps: a git tag name can contain shell
+      # metacharacters, so ${{ github.ref_name }} must never be
+      # interpolated straight into a run: script (CWE-78 template
+      # injection, caught on review).
       - name: gh release create --draft
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
           IMAGE: ${{ needs['oci-image'].outputs.image }}
           DIGEST: ${{ needs['oci-image'].outputs.digest }}
           SANDBOX_DIGEST: ${{ needs['oci-image-sandbox'].outputs.digest }}
@@ -609,7 +630,7 @@ jobs:
             echo "Signed keylessly with cosign (Fulcio + Rekor) and carries SLSA Build L3 provenance (issue #173)."
             echo "SBOM in both CycloneDX and SPDX formats (issue #174)."
             echo "OCI image (linux/amd64 only for now -- linux/arm64 temporarily dropped, see release.yml's own comment on why), also cosign-signed: \`${IMAGE}@${DIGEST}\` (issue #176)."
-            echo "\`--sandbox podman\` image (issue #229), same repository tagged \`${{ github.ref_name }}-sandbox\`, also cosign-signed: \`${IMAGE}@${SANDBOX_DIGEST}\`."
+            echo "\`--sandbox podman\` image (issue #229), same repository tagged \`${TAG}-sandbox\`, also cosign-signed: \`${IMAGE}@${SANDBOX_DIGEST}\`."
             echo
             echo "Verify a binary's signature:"
             echo '```'
@@ -629,8 +650,8 @@ jobs:
           # to run git: fatal: not a git repository"). `REPO` is
           # already set above for the release notes text; explicit
           # `--repo` avoids adding a whole checkout just for this.
-          gh release create "${{ github.ref_name }}" release/* \
+          gh release create "$TAG" release/* \
             --repo "$REPO" \
             --draft \
-            --title "${{ github.ref_name }}" \
+            --title "$TAG" \
             --notes-file notes.md
