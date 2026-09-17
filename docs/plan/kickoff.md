@@ -3,7 +3,7 @@
 ## One-time setup (human)
 
 ```bash
-git clone git@github.com:williamcaban/agent-wkp.git && cd agent-wkp
+git clone git@github.com:agent-wkp/wkp.git && cd wkp
 git tag v0-python main && git push origin v0-python     # freeze the Python implementation
 git checkout v2-rust
 rustup toolchain install stable && rustup component add clippy rustfmt

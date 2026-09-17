@@ -83,7 +83,7 @@ Confidence labels used: **established** (spec, official docs, or peer-reviewed),
 
 Every agentic harness invents its own memory: Claude Code has `CLAUDE.md`, project memory directories and hooks; OpenCode reads `AGENTS.md`; Hermes Agent, dsh and others each carry their own conventions. The memory a user or agent accumulates in one harness (who the user is, how a project works, facts uncovered mid-session, instructions, feedback) is stranded there. It does not follow the user to a second machine, to a second harness, or to a second instance of the same harness with a different working directory.
 
-agent-wkp already solves the intra-harness half of this: a directory of markdown files becomes a tier-aware, BM25-searchable store injected at session start via a hook, with more fetched on demand through `wkp search` over Bash, consuming no MCP tool-definition tokens and requiring no infrastructure ([agent-wkp README](https://github.com/williamcaban/agent-wkp)). The gap is portability and continuity across harnesses and machines.
+agent-wkp already solves the intra-harness half of this: a directory of markdown files becomes a tier-aware, BM25-searchable store injected at session start via a hook, with more fetched on demand through `wkp search` over Bash, consuming no MCP tool-definition tokens and requiring no infrastructure ([agent-wkp README](https://github.com/agent-wkp/wkp)). The gap is portability and continuity across harnesses and machines.
 
 ### 1.2 Goals (in priority order, per the brief)
 
@@ -204,7 +204,7 @@ Two repos live outside the workspace by convention: `homebrew-wkp` (Homebrew req
 
 **Reasoning.**
 
-- *Latency.* The hot path is a subprocess spawned by a harness hook or Bash call. Interpreter start plus imports is a fixed tax paid on every call; a static native binary starts in low single-digit milliseconds. This is the single largest lever on the p50 targets below. The current Python implementation defers `sentence-transformers` to index time to avoid this cost ([agent-wkp README](https://github.com/williamcaban/agent-wkp)); Rust removes the tax entirely.
+- *Latency.* The hot path is a subprocess spawned by a harness hook or Bash call. Interpreter start plus imports is a fixed tax paid on every call; a static native binary starts in low single-digit milliseconds. This is the single largest lever on the p50 targets below. The current Python implementation defers `sentence-transformers` to index time to avoid this cost ([agent-wkp README](https://github.com/agent-wkp/wkp)); Rust removes the tax entirely.
 - *Security.* Memory safety without a garbage collector, `#![forbid(unsafe_code)]` enforceable at the crate level, and a dependency ecosystem with first-class supply-chain tooling (`cargo-audit`, `cargo-deny`, `cargo-vet`, section 9).
 - *Slim core and distribution.* One file, no runtime, no `pip`/`venv` drift on the user's machine, trivially embeddable inside a harness container image. Cross-compiled for `x86_64`/`aarch64` on Linux and macOS.
 - *Agentic maintainers.* **[judgment]** A strict compiler and type system is the cheapest continuous reviewer of agent-generated code. The peer-reviewed evidence that AI-assisted code is measurably more likely to contain vulnerabilities (Pearce et al., "Asleep at the Keyboard?", IEEE S&P 2022, [arXiv:2108.09293](https://arxiv.org/abs/2108.09293); Perry et al., "Do Users Write More Insecure Code with AI Assistants?", ACM CCS 2023, [arXiv:2211.03622](https://arxiv.org/abs/2211.03622)) argues for a language where a large class of memory and concurrency defects cannot compile.
@@ -615,8 +615,8 @@ Memory writes from a harness use `wkp remember --type <type> --principal agent:<
 
 ## References (primary sources)
 
-- agent-wkp repository and README: https://github.com/williamcaban/agent-wkp
-- agent-wkp architecture (v0, Python implementation, `main` branch): https://github.com/williamcaban/agent-wkp/blob/main/docs/architecture.md
+- agent-wkp repository and README: https://github.com/agent-wkp/wkp
+- agent-wkp architecture (v0, Python implementation, `main` branch): https://github.com/agent-wkp/wkp/blob/main/docs/architecture.md
 - This repo's own local-mode-vs-hub-mode architecture diagrams (v2, current): `docs/design/architecture.md`
 - Memory layers comparison: https://github.com/RyanAlberts/best-of-Agent-Harnesses/blob/main/comparisons/memory-layers.md
 - SQLite FTS5: https://www.sqlite.org/fts5.html
