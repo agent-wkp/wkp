@@ -144,6 +144,18 @@ fn index_succeeds_under_the_write_sandbox_against_a_real_git_repo() {
     // that's a property of the source code, verified by hand, not
     // something this cross-environment test can assert without risking
     // exactly the false failure this comment is explaining.
+    //
+    // This doesn't leave the test able to pass vacuously on a kernel
+    // where nothing is actually restricted (`NotEnforced`), a real
+    // concern raised on review: `write_sandbox_allows_inside_denies_outside`
+    // above, in this same file, hard-asserts (no best-effort tolerance)
+    // that an out-of-store write through the same `restrict_writes_to`
+    // is genuinely denied at the kernel level. That test would itself
+    // fail on a `NotEnforced` kernel, so its passing on whatever
+    // environment runs this suite is the independent guarantee that
+    // real enforcement is active here -- this test only needs to prove
+    // the additional, narrower claim that `/dev/null` being in the
+    // allowed set doesn't also let git's own startup access through.
     if stderr.contains("not fully enforced") {
         eprintln!(
             "note: write-sandbox reported less than full enforcement on this kernel \
