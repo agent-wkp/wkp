@@ -17,6 +17,7 @@ mod index_cmd;
 mod init;
 mod materialize;
 mod merge_driver;
+mod podman_sandbox;
 mod promote;
 mod purge;
 mod remember;
@@ -102,6 +103,10 @@ Commands:
   --version, -V          Print the version and exit
   --help, -h, help       Print this message and exit
 
+  --sandbox <backend> <COMMAND> [ARGS]
+                         Run COMMAND inside a container instead of
+                         natively (ADR-0015). Backends: podman.
+
 See AGENTS.md for how an agent should use these, or docs/plan/milestones.md
 for what each one's own acceptance criteria are.\
 ";
@@ -109,8 +114,43 @@ for what each one's own acceptance criteria are.\
 fn main() {
     // Dispatching on a CLI flag, not a security-sensitive use of argv.
     let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args
-    let command = args.next();
+    let first = args.next();
 
+    // `--sandbox <backend> <COMMAND> [ARGS]` is handled before the
+    // ordinary subcommand dispatch below: it isn't a subcommand itself,
+    // it's a modifier that re-execs whatever subcommand follows it
+    // inside a container (`podman_sandbox::run`). Checked here, first,
+    // since it must consume two tokens (the flag and its backend)
+    // before the real subcommand name is even reached.
+    if first.as_deref() == Some("--sandbox") {
+        let backend = args.next();
+        match backend.as_deref() {
+            Some("podman") => {
+                let remaining: Vec<String> = args.collect();
+                if remaining.is_empty() {
+                    eprintln!("wkp: --sandbox podman requires a command, e.g. `wkp --sandbox podman index`");
+                    std::process::exit(1);
+                }
+                match podman_sandbox::run(&remaining) {
+                    Ok(code) => std::process::exit(code),
+                    Err(msg) => {
+                        eprintln!("wkp: --sandbox podman failed: {msg}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Some(other) => {
+                eprintln!("wkp: unknown --sandbox backend '{other}' (supported: podman)");
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("wkp: --sandbox requires a backend, e.g. `wkp --sandbox podman index`");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let command = first;
     match command.as_deref() {
         None => {
             eprintln!("{USAGE}");

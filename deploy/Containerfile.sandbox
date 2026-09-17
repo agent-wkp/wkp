@@ -1,0 +1,39 @@
+# `--sandbox podman` image (ADR-0015, issue #225): what `wkp --sandbox
+# podman <command>` runs the given command inside. Distinct from
+# `deploy/Containerfile` (M6-7, issue #176) -- that one is `FROM scratch`
+# to prove the CLI binary's own static-link property and deliberately
+# has nothing else in it, which means no `git` binary. Every `wkp`
+# subcommand that touches a real store shells out to `git`
+# (`crates/wkp-git`), so that image fails immediately for anything
+# beyond `--version` -- found by hand while building this feature.
+# `quay.io/fedora/fedora-minimal`, not `scratch`: this project's own
+# container preference, and the smallest practical base that can hold a
+# real `git` install.
+#
+# Build a release binary for the matching musl target first (see
+# deploy/Containerfile's own comment for the exact cargo/cross command),
+# then:
+#   podman build -f deploy/Containerfile.sandbox -t wkp-sandbox .
+#   podman run --rm -v "$PWD:$PWD:Z" -w "$PWD" wkp-sandbox index
+#
+# `TARGET` (matches deploy/Containerfile's own build-arg convention):
+# which cross-compile target's already-built binary to copy in.
+FROM quay.io/fedora/fedora-minimal:41
+ARG TARGET=x86_64-unknown-linux-musl
+
+# git >= 2.34 (wkp's own minimum, ADR-0001): fedora-minimal:41 ships
+# 2.52 at the time of writing, well above it.
+RUN microdnf install -y --setopt=install_weak_deps=0 git \
+    && microdnf clean all
+
+# git refuses a repo it doesn't consider itself the owner of ("detected
+# dubious ownership") whenever the UID that created a file differs from
+# the UID reading it now -- a real, ordinary occurrence here since
+# `podman_sandbox::run` bind-mounts an arbitrary *host* directory (the
+# caller's own store) that this container's user didn't create. Same
+# issue, same fix `deploy/hub/Containerfile` already documents for its
+# own bind-mounted-repo scenario, not specific to this image.
+RUN printf '[safe]\n\tdirectory = *\n' > /etc/gitconfig
+
+COPY target/${TARGET}/release/wkp /usr/local/bin/wkp
+ENTRYPOINT ["/usr/local/bin/wkp"]
