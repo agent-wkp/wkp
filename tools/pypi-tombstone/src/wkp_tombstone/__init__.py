@@ -17,12 +17,12 @@ import sys
 MESSAGE = (
     "agent-wkp (Python) is retired. It has moved to a Rust binary, wkp.\n"
     "Install it from GitHub Releases: "
-    "https://github.com/williamcaban/agent-wkp/releases\n"
+    "https://github.com/agent-wkp/wkp/releases\n"
     "Design doc: "
-    "https://github.com/williamcaban/agent-wkp/blob/main/docs/design/wkp-hub-design-v0.1.md\n"
+    "https://github.com/agent-wkp/wkp/blob/main/docs/design/wkp-hub-design-v0.1.md\n"
     "The last working Python implementation remains at the v0-python tag, "
     "unmaintained:\n"
-    "https://github.com/williamcaban/agent-wkp/tree/v0-python\n"
+    "https://github.com/agent-wkp/wkp/tree/v0-python\n"
 )
 
 

@@ -5,6 +5,13 @@ Rust binary that gives any agentic harness durable, cross-machine,
 cross-harness memory: a git repository of markdown files, a derived SQLite
 FTS5 index, and optional sync to a hosted hub.
 
+This repository moved from `github.com/williamcaban/agent-wkp` to
+`github.com/agent-wkp/wkp` on 2026-09-17 (an org, decoupled from a personal
+account). The old URL redirects for `git clone`/`git remote`, but update it
+when convenient; the Homebrew tap moved the same day, from
+`williamcaban/homebrew-wkp` to `agent-wkp/homebrew-wkp` (`brew install
+agent-wkp/wkp/wkp`).
+
 This is that rewrite, and (per ADR-0013) is now `main`'s own tree — `v2-rust`
 is retired. M0 through M5 are done; M6 (hardening and release) is mostly
 done: Linux Landlock/seccomp sandboxing, cosign-signed reproducible
@@ -26,11 +33,11 @@ criterion holds and what's still open.
 macOS (Apple Silicon) or Linux (x86_64):
 
 ```
-brew install williamcaban/wkp/wkp
+brew install agent-wkp/wkp/wkp
 ```
 
 Or download a signed binary directly from
-[GitHub Releases](https://github.com/williamcaban/agent-wkp/releases) —
+[GitHub Releases](https://github.com/agent-wkp/wkp/releases) —
 every release is cosign-signed (keyless, Fulcio + Rekor) with SLSA Build L3
 provenance and an SBOM; see a release's own notes for verification
 instructions. An OCI image (`linux/amd64`) is published alongside each
@@ -94,7 +101,7 @@ wkp --sandbox podman search "topic"
 ```
 
 Needs a working `podman` on `PATH` (on macOS, a running `podman machine`).
-Pulls `ghcr.io/williamcaban/wkp:v<version>-sandbox` by default, matching your
+Pulls `ghcr.io/agent-wkp/wkp:v<version>-sandbox` by default, matching your
 binary's own version; set `WKP_SANDBOX_IMAGE` to point at a different image
 (e.g. one you built locally from `deploy/Containerfile.sandbox`) instead.
 This is a different mechanism from the self-re-exec ADR-0015 rejected, not a
@@ -163,7 +170,7 @@ own "run this at the start of a session/task" mechanism is if it isn't
 
 The original Python `agent-wkp` (progressive-disclosure knowledge index with
 BM25/semantic search over SQLite) is frozen at the [`v0-python`
-tag](https://github.com/williamcaban/agent-wkp/tree/v0-python) and on the
+tag](https://github.com/agent-wkp/wkp/tree/v0-python) and on the
 `main` branch's history before the M0-4 cutover. It is not maintained going
 forward; this rewrite supersedes it. The PyPI package (`pip
 install agent-wkp`) now resolves to a `0.3.0` tombstone release that prints

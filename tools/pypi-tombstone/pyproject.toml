@@ -22,10 +22,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage      = "https://github.com/williamcaban/agent-wkp"
-Repository    = "https://github.com/williamcaban/agent-wkp"
-"Design doc"  = "https://github.com/williamcaban/agent-wkp/blob/main/docs/design/wkp-hub-design-v0.1.md"
-Releases      = "https://github.com/williamcaban/agent-wkp/releases"
+Homepage      = "https://github.com/agent-wkp/wkp"
+Repository    = "https://github.com/agent-wkp/wkp"
+"Design doc"  = "https://github.com/agent-wkp/wkp/blob/main/docs/design/wkp-hub-design-v0.1.md"
+Releases      = "https://github.com/agent-wkp/wkp/releases"
 
 [project.scripts]
 wkp = "wkp_tombstone:main"
