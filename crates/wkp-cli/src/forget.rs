@@ -53,10 +53,13 @@ pub(crate) fn parse_forget_args(
         }
     }
 
-    let principal =
-        principal.ok_or_else(|| "forget requires --principal <principal>".to_string())?;
-    let signing_key_file =
-        signing_key_file.ok_or_else(|| "forget requires --signing-key-file <path>".to_string())?;
+    const USAGE_EXAMPLE: &str = "e.g. `wkp forget inbox/item.md --principal human:alice \
+         --signing-key-file ~/.ssh/id_ed25519`";
+
+    let principal = principal
+        .ok_or_else(|| format!("forget requires --principal <principal>, {USAGE_EXAMPLE}"))?;
+    let signing_key_file = signing_key_file
+        .ok_or_else(|| format!("forget requires --signing-key-file <path>, {USAGE_EXAMPLE}"))?;
 
     let target = match (item_path, device) {
         (Some(_), Some(_)) => {

@@ -53,12 +53,18 @@ pub(crate) fn parse_hub_register_args(
         }
     }
 
-    let hub_url = hub_url.ok_or_else(|| "hub register requires --hub-url <url>".to_string())?;
-    let tenant_slug =
-        tenant_slug.ok_or_else(|| "hub register requires --tenant <slug>".to_string())?;
+    const USAGE_EXAMPLE: &str = "e.g. `wkp hub register --hub-url https://hub.example.com \
+         --tenant acme --ca-cert ./hub-ca.pem`";
+
+    let hub_url =
+        hub_url.ok_or_else(|| format!("hub register requires --hub-url <url>, {USAGE_EXAMPLE}"))?;
+    let tenant_slug = tenant_slug
+        .ok_or_else(|| format!("hub register requires --tenant <slug>, {USAGE_EXAMPLE}"))?;
     let ca_cert_path = ca_cert_path.ok_or_else(|| {
-        "hub register requires --ca-cert <path> (the hub's own CA root, from `wkp-hub ca-cert`)"
-            .to_string()
+        format!(
+            "hub register requires --ca-cert <path> (the hub's own CA root, from \
+             `wkp-hub ca-cert`), {USAGE_EXAMPLE}"
+        )
     })?;
 
     Ok(HubRegisterOptions {

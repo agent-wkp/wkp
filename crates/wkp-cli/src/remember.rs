@@ -48,11 +48,16 @@ pub(crate) fn parse_remember_args(
         }
     }
 
-    let item_type = item_type.ok_or_else(|| "remember requires --type <type>".to_string())?;
-    let principal =
-        principal.ok_or_else(|| "remember requires --principal <principal>".to_string())?;
+    const USAGE_EXAMPLE: &str = "e.g. `wkp remember --type knowledge --principal \
+         agent:claude --signing-key-file ~/.ssh/id_ed25519 <<EOF\n<your content>\nEOF`\
+         \n(content is read from stdin, never argv)";
+
+    let item_type =
+        item_type.ok_or_else(|| format!("remember requires --type <type>, {USAGE_EXAMPLE}"))?;
+    let principal = principal
+        .ok_or_else(|| format!("remember requires --principal <principal>, {USAGE_EXAMPLE}"))?;
     let signing_key_file = signing_key_file
-        .ok_or_else(|| "remember requires --signing-key-file <path>".to_string())?;
+        .ok_or_else(|| format!("remember requires --signing-key-file <path>, {USAGE_EXAMPLE}"))?;
 
     Ok(RememberOptions {
         path,

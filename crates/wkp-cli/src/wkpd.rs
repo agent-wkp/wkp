@@ -82,8 +82,13 @@ pub(crate) fn parse_wkpd_args(
         }
     }
 
-    let principal = principal.ok_or("wkpd requires --principal <principal>")?;
-    let signing_key_file = signing_key_file.ok_or("wkpd requires --signing-key-file <path>")?;
+    const USAGE_EXAMPLE: &str = "e.g. `wkp wkpd --principal device:laptop \
+         --signing-key-file ~/.ssh/id_ed25519`";
+
+    let principal = principal
+        .ok_or_else(|| format!("wkpd requires --principal <principal>, {USAGE_EXAMPLE}"))?;
+    let signing_key_file = signing_key_file
+        .ok_or_else(|| format!("wkpd requires --signing-key-file <path>, {USAGE_EXAMPLE}"))?;
 
     Ok(WkpdOptions {
         path,
