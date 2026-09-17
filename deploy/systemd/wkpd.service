@@ -20,7 +20,7 @@
 
 [Unit]
 Description=wkpd: watch-triggered wkp sync automation
-Documentation=https://github.com/williamcaban/agent-wkp
+Documentation=https://github.com/agent-wkp/wkp
 
 [Service]
 Type=simple
