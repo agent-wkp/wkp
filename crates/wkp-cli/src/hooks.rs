@@ -57,11 +57,20 @@ pub(crate) fn parse_hooks_args(mut args: impl Iterator<Item = String>) -> Result
 /// `wkp hooks --framework <name>`: prints the exact text for a harness
 /// to apply. `claude_code` gets a real `SessionStart` hook (design
 /// 3.3) -- applying it to `.claude/settings.local.json` is left to the
-/// caller. `codex`/`opencode`/`hermes`/`agents_md` all get the same
-/// instruction text (see module doc comment for why one text serves
-/// all four, and for the honest caveat on `hermes` specifically).
-/// Re-indexes quietly and best-effort (`|| true`: a broken index must
-/// never block the session) in both cases.
+/// caller; its embedded command re-indexes quietly and best-effort
+/// (`|| true`: a broken index must never block the session).
+/// `codex`/`opencode`/`hermes`/`agents_md` all get the same instruction
+/// text instead (see module doc comment for why one text serves all
+/// four, and for the honest caveat on `hermes` specifically) -- its
+/// `wkp index && wkp materialize --tier 0 && cat .wkp/tier0.md` is
+/// plain `&&` chaining, deliberately *not* quiet or best-effort the
+/// same way: a harness reading `AGENTS.md` sees a failed `wkp index`
+/// as a real, visible failure rather than a silently empty tier 0,
+/// which is the more honest default for a plain shell instruction a
+/// human or agent reads and runs by hand (the `claude_code` hook's own
+/// `|| true` suppression is a deliberate choice specific to a
+/// SessionStart hook, not a general policy this command applies
+/// everywhere).
 pub(crate) fn render_hooks(framework: &str) -> Result<String, String> {
     match framework {
         "claude_code" => Ok(CLAUDE_CODE_HOOK.to_string()),
