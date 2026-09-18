@@ -48,8 +48,11 @@ reaching out unless you opt in.
 
 ### `wkp context <query> [--tier N] [--budget N] [-k/--limit N] [--format text|paths|json] [--path DIR]`
 
-Same flags as `search`. Adds a graph traversal of the `refs:`/wikilink
-edges from each hit, so you also get directly-linked neighbors, not just
+Same non-embedding flags as `search` (`--embed-url`/`--embed-model`/
+`--embed-key-file` are search-only — `context` rejects them explicitly,
+not just silently ignores them). Adds a graph traversal of the
+`refs:`/wikilink edges from each hit, so you also get directly-linked
+neighbors, not just
 the hits themselves.
 
 ### `wkp traverse <path> [--depth N] [--format text|paths|json] [--path DIR]`
