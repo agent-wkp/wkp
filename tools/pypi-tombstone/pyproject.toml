@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-wkp"
-version = "0.3.0"
+version = "0.3.1"
 description = "RETIRED — agent-wkp has moved to a Rust binary (wkp); see the project's GitHub Releases"
 readme = "README.md"
 license = { file = "LICENSE" }
