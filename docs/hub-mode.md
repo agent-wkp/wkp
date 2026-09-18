@@ -51,11 +51,20 @@ podman build -f deploy/hub/Containerfile -t wkp-hub .
 
 ```bash
 podman run -d --name wkp-hub -p 8443:8443 \
-  -e DATABASE_URL="postgres://user:pass@host/wkp_hub" \
+  -e DATABASE_URL="postgres://user:REDACTED@host/wkp_hub" \
   -v wkp-hub-ca:/srv/wkp-hub/ca \
   -v wkp-hub-repos:/srv/wkp-hub/repos \
   wkp-hub
 ```
+
+**Don't put the real password on the command line as shown above** — it
+lands in shell history and process listings. `wkp-hub serve` reads
+`DATABASE_URL` from its process environment and has no other input
+path today (no `--database-url` flag, no file-based secret option) —
+so supply the real value through whatever secret-injection mechanism
+your own deployment already uses for other services (a systemd
+credential, a Kubernetes `Secret`, a `podman secret` mounted and read
+by a wrapper script), not typed inline.
 
 Schema applies automatically on first connect — `wkp-hub migrate` just
 confirms it (`wkp-hub: schema is up to date`), there's no separate
@@ -89,13 +98,34 @@ wkp hub register --hub-url https://hub.example.com:8443 \
 ```
 
 Runs the OAuth 2.0 Device Authorization Grant (RFC 8628) — no password,
-no browser redirect handled by the CLI. The device generates an Ed25519
-key (OS keystore: macOS Keychain, Linux `secret-service`, falling back
-to `ssh-agent`), submits a CSR built from it, and the hub's own CA signs
-and returns a certificate. From here, `wkp sync`/`wkpd` against this hub
-work exactly like [multi-machine sync](multi-machine-sync.md) does
-against any other git remote — the hub's `origin` is just another git
-server that happens to also do mTLS and revocation.
+no browser redirect handled by the CLI. The device generates (or
+reuses) an Ed25519 signing identity — OS keystore first, falling back
+to a `0600` file at `.wkp/hub-signing-identity` — and submits a CSR
+built from it; the hub's own CA signs and returns a certificate. On
+approval, `wkp hub register` writes three files: the certificate
+(`.wkp/hub-device-cert.pem`), the hub's CA root
+(`.wkp/hub-ca-cert.pem`), and a PKCS#8 PEM copy of the same signing
+key (`.wkp/hub-device-key.pem`, `0600`) — that last one is what
+`git`/`curl`'s OpenSSL-backed TLS stack needs, since it can't load the
+OpenSSH-format signing identity directly. (This is a separate identity
+from `.wkp/device-identity`, the age *encryption* key multi-machine
+sync uses — unrelated key, unrelated purpose.)
+
+Registration only writes those files; it does not add a git remote or
+configure git's TLS options. Do both before `wkp sync`/`wkpd` will
+work against this hub:
+
+```bash
+git remote add origin https://hub.example.com:8443/acme.git
+git config --local http.sslCert .wkp/hub-device-cert.pem
+git config --local http.sslKey .wkp/hub-device-key.pem
+git config --local http.sslCAInfo .wkp/hub-ca-cert.pem
+```
+
+From here, `wkp sync`/`wkpd` against this hub work exactly like
+[multi-machine sync](multi-machine-sync.md) does against any other git
+remote — the hub's `origin` is just another git server that happens to
+also do mTLS and revocation.
 
 ## Revoke a device
 
@@ -106,9 +136,17 @@ wkp-hub device revoke-id <device-id>
 Effective on that device's *next* connection attempt — the mTLS
 `ClientCertVerifier` checks revocation state on every TLS handshake.
 For an incident where "next connection" isn't fast enough (a leaked
-credential, a suspected CA compromise), `wkp-hub reset-all-connections
---by <label>` force-closes already-open connections too, not just
-future ones.
+credential), `wkp-hub reset-all-connections --by <label>` force-closes
+already-open connections too, not just future ones.
+
+**That command doesn't cover a suspected CA compromise.** It only
+closes active connections — the hub keeps trusting its existing CA
+afterward, so any certificate that CA already signed (and that hasn't
+been individually revoked) can simply reconnect. Recovering from a
+compromised CA means rotating the hub's own CA (replacing the files
+under `WKP_HUB_CA_DIR`) and re-enrolling every device against the new
+one — there's no single command for this today; treat it as a manual
+incident-response procedure, not a routine one.
 
 ## Known gap: Debian/Ubuntu client git
 
