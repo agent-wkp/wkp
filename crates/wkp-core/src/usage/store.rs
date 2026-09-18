@@ -34,6 +34,17 @@ pub fn open_usage_db(path: &Path) -> Result<Connection, UsageError> {
     Ok(conn)
 }
 
+/// Opens an existing `.wkp/metrics.db` strictly read-only -- for `wkp
+/// usage` and any other pure reader, which must never create the file,
+/// create its schema, or write a pragma against it the way
+/// `open_usage_db` (the write side's opener) does. The caller is
+/// expected to have already checked the file exists (`open_usage_db`'s
+/// create-if-absent behavior is specifically what a reader must not
+/// trigger); opening a nonexistent path here fails cleanly instead.
+pub fn open_usage_db_read_only(path: &Path) -> Result<Connection, UsageError> {
+    Ok(wkp_sys::open_read_only(path)?)
+}
+
 fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS metrics (

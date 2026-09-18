@@ -92,7 +92,8 @@ pub(crate) fn run_usage(opts: &UsageOptions) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let conn = wkp_core::usage::open_usage_db(&metrics_path).map_err(|e| e.to_string())?;
+    let conn =
+        wkp_core::usage::open_usage_db_read_only(&metrics_path).map_err(|e| e.to_string())?;
     let now = SystemTime::now();
 
     let all = wkp_core::usage::list_metrics(&conn).map_err(|e| e.to_string())?;
@@ -108,6 +109,13 @@ pub(crate) fn run_usage(opts: &UsageOptions) -> Result<String, String> {
         }
         let summary = wkp_core::usage::query_window(&conn, name, opts.window, now)
             .map_err(|e| e.to_string())?;
+        if summary.n == 0 {
+            // No activity in this window -- `min`/`max`/`last` would all
+            // read as a meaningless 0.0 (design 5.5's own `MetricSummary`
+            // doc comment), indistinguishable from a real reading of
+            // zero. Omit the row entirely rather than print it.
+            continue;
+        }
         let errors = if *kind == MetricKind::Counter {
             wkp_core::usage::query_window(&conn, &format!("{name}.err"), opts.window, now)
                 .map_err(|e| e.to_string())?
@@ -315,5 +323,29 @@ mod tests {
         let out = run_usage(&opts).expect("run_usage");
         assert!(out.contains("search"), "{out}");
         assert!(!out.contains("index "), "{out}");
+    }
+
+    #[test]
+    fn run_usage_omits_metrics_with_no_activity_in_the_window() {
+        let dir = store_dir("stale");
+        let db_path = dir.path().join(".wkp/metrics.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let mut conn = wkp_core::usage::open_usage_db(&db_path).expect("open usage db");
+        // Recorded well outside the window this test queries -- must not
+        // show up as a misleading all-zero row (min/max/last would read
+        // as 0.0, indistinguishable from a real zero reading).
+        let long_ago = SystemTime::now() - Duration::from_secs(365 * 24 * 3600);
+        wkp_core::usage::record_counter(&mut conn, "search", Duration::from_millis(5), long_ago)
+            .unwrap();
+        drop(conn);
+
+        let opts = UsageOptions {
+            path: dir.path().to_path_buf(),
+            window: Duration::from_secs(3600),
+            tool: None,
+            json: false,
+        };
+        let out = run_usage(&opts).expect("run_usage");
+        assert_eq!(out, "wkp: no usage data in this window");
     }
 }
