@@ -5,7 +5,7 @@ BM25/semantic search over SQLite) is frozen at the [`v0-python`
 tag](https://github.com/agent-wkp/wkp/tree/v0-python) and on the
 `main` branch's history before the M0-4 cutover. It is not maintained going
 forward; this rewrite supersedes it. The PyPI package (`pip
-install agent-wkp`) now resolves to a `0.3.0` tombstone release that prints
+install agent-wkp`) now resolves to a `0.3.1` tombstone release that prints
 a retirement message and exits — it carries no functionality (see
 [`docs/plan/pypi-retirement.md`](plan/pypi-retirement.md)).
 
