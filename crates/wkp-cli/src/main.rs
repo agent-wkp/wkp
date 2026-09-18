@@ -777,8 +777,10 @@ fn main() {
     // consumes) purely to name the metric this invocation records --
     // `std::env::args()` can be called any number of times, each
     // yielding a fresh iterator over the same process arguments, so this
-    // never disturbs `dispatch`'s own parsing.
-    let tool = std::env::args().nth(1).unwrap_or_default();
+    // never disturbs `dispatch`'s own parsing. Naming a local metric, not
+    // a security-sensitive use of argv -- same reasoning as `dispatch`'s
+    // own identical suppression on its first read of argv.
+    let tool = std::env::args().nth(1).unwrap_or_default(); // nosemgrep: rust.lang.security.args.args
     let code = dispatch();
     record_invocation(&tool, start.elapsed(), code);
     std::process::exit(code);
