@@ -9,6 +9,14 @@
 
 ## Changelog
 
+- 2026-09-18: **D11 added**: local usage metrics (per-tool invocation counts and
+  latency, plus a couple of gauges such as indexed-item count) as a bounded-size
+  SQLite ring buffer, `.wkp/metrics.db`, on by default, read via `wkp usage`.
+  Hub-side, `wkp-hub usage` covers the hub's own server-side operations only
+  (front door, per-tenant indexer runs) -- a device never transmits its local
+  metrics to the hub. See `docs/adr/0016-local-usage-metrics.md`, new sections
+  5.5 and 8.4 below, and the updated 3.2/12 decision tables. Not yet
+  implemented; this is the accepted decision, not a shipped feature.
 - 2026-09-14: **Issue #165 fixed** (ADR-0014): a tenant's *entire* storage directory (`repos_root/<slug>`, containing `repo.git` and `index.db` as true siblings) is now bind-mounted as one unit into both of that tenant's containers, not just the bare repo -- per William's direction, a local-folder bind mount for Podman today, a PersistentVolumeClaim at the same container path once issue #141's Kubernetes backend lands. Fixes the gap #159's own fix surfaced: `index.db` previously lived outside the bind mount entirely, so it was never host-persisted and never visible to a container other than whichever one most recently wrote it. `http.rs`'s `serve_git_http` changes to match (`GIT_PROJECT_ROOT` becomes per-tenant, `PATH_INFO` drops the now-redundant slug prefix) -- a server-side detail only, the wire-facing `<slug>.git` URL convention a git client actually uses is unchanged. Verified by hand (a file written by one container in a pod is visible to a sibling container sharing the same mount, and on the host) and by `deploy/hub/test-tenant-indexing-isolation.sh`'s updated assertions.
 - 2026-09-14: **Issue #159 fixed**: a tenant's pod now runs two containers, not one -- the network-facing `serve-tenant` and a separate, no-network `index-worker` (`--network none` + a seccomp profile denying socket syscalls, `deploy/hub/seccomp-no-network.json`). Corrects ADR-0009's original assumption that a same-pod sibling container would get "no network" for free from the pod's shared network namespace -- verified by hand that it would not (see ADR-0009's own 2026-09-14 addendum); the real mechanism is per-container `--network none` (Podman-only) plus seccomp (the part with a real Kubernetes equivalent, `securityContext.seccompProfile`). No more `post-receive` hook: `index-worker` polls the bare repo's `HEAD` on the shared bind mount instead, since a hook in the serving container has no network-free way to signal the separate indexing container. Found along the way, not fixed here: `index.db` still isn't host-persisted or visible across the two containers (issue #165) -- 8.3's Process row and ADR-0009's addendum both flag it.
 - 2026-09-13: Full-document accuracy audit (four parallel passes covering every section) found real drift beyond the 8.1/8.2 annotations already in place: a stale two-transport/shared-repo diagram (3.1), an out-of-date repo-structure listing (`wkp-shell`, a nonexistent `adapters/` directory, removed `sshd_config`, 3.3), an inaccurate macOS peer-credential claim (4.2, corrected per ADR-0004), a `wkp gc` command that was never built (5.1), a nonexistent `wkp verify` subcommand described in place of what `wkp index` actually does (7.3), an overstated per-project instruction-scoping precision (7.4, now open question 11.7), `wkp forget`'s two-operation split (ADR-0007) never reflected here (7.6), a hub-hardening table (8.3) still describing the pre-ADR-0009/0011 world including a claimed no-network sandboxed indexing worker that was never built (**tracked as issue #159**, not just a doc fix), and section 9's entire CI/pipeline description significantly overstating what's actually running (branch protection, Scorecard gating, Trivy/Grype/SBOM/CodeQL-as-analyzer/cargo miri, most named fuzz targets, the SSH-era integration test). All annotated in place per this doc's own convention (`[status], not just stale prose` rather than silent deletion); nothing here is a new decision, only a correction of what's already decided or already built.
@@ -169,6 +177,7 @@ The last row is the strategic bet **[judgment]**: for a micro-SaaS aimed at tech
 | D8 | Per-tenant SQLite indexes on the hub, Postgres only for the control plane | 8.2 -- **isolation mechanism superseded (ADR-0009/0010/0012): a container-runtime pod per tenant, not a Unix-UID switch; Postgres-for-control-plane half unaffected** |
 | D9 | Memory written by agents is provenance-tagged and never enters Tier 0 without a human-signed commit | 7.4 |
 | D10 | Pipeline treats agentic maintainers as untrusted contributors with strong, automated gates | 9 |
+| D11 | Local usage metrics (tool invocation counts, latency, a few gauges) live in a bounded-size SQLite ring buffer, on by default, never synced or transmitted; hub-side metrics cover the hub's own operations only | 5.5, 8.4 |
 
 ### 3.3 Repository structure
 
@@ -242,6 +251,7 @@ Two repos live outside the workspace by convention: `homebrew-wkp` (Homebrew req
 | `wkp remember` (write + commit) | < 50 ms / 150 ms | Plumbing commit, no hooks in the hot path |
 | `wkp materialize --tier 0\|1` | < 30 ms / 100 ms | Assembles `tier{N}.md` from the index; same order of magnitude as the incremental-index target |
 | Peak RSS for `wkp search` | < 30 MB | Excludes optional embedding client |
+| Usage-metrics write (per invocation, D11) | < 1 ms / 3 ms | A handful of `UPDATE`s against `.wkp/metrics.db`; best-effort, failure never fails the command |
 
 **Partially measured, not just engineering targets** (`benches/README.md`, `benches/baseline.json`, CI's `bench` job): cold `wkp search` on a 50k-item corpus meets its target comfortably (~260µs in-process, ~2-3ms including real process-spawn overhead measured separately); peak RSS was separately confirmed around 5.7MB on a small store, within budget. Incremental index originally **missed its target by roughly an order of magnitude** (~400-500ms measured, not 30ms) -- not because of the `VACUUM INTO` copy mechanism first suspected, but because deleting a changed item's row from `items`/`items_trigram` (FTS5 tables with an unindexed `path` column) was a full-corpus table scan either way. **Fixed (ADR-0002, accepted, issue #29)**: `index.db` writes now go directly against the file inside a real SQLite transaction, and FTS5 rows are addressed by rowid (aligned with `paths`' own indexed rowid) instead of by the unindexed `path` column -- measured ~2.9-4ms locally, comfortably inside target; `benches/baseline.json` carries the real CI-measured number. `wkp remember`'s own row has no benchmark yet and remains an engineering target only.
 
@@ -329,6 +339,34 @@ store/
 ```
 
 One subject per file is a hard convention because it is the primary conflict-avoidance mechanism for sync (section 6.2).
+
+### 5.5 D11: Local usage metrics as a bounded-size SQLite ring buffer
+
+**Decision.** `wkp` records, for every subcommand invocation, its tool name, wall-clock duration, and exit status (ok/err), plus a small number of gauges sampled at natural touchpoints (indexed item count at the end of `wkp index`, store size). These are written to `.wkp/metrics.db`, a SQLite file alongside `index.db`, `.gitignore`d the same way. `wkp usage` reads it back (`--window 1h|1d|7d|30d`, `--tool <name>`, `--json`). On by default; no flag required to get it, no separate consent flow, matching the same "counts and durations only, never content" bar the rest of `wkp`'s local state already sits at.
+
+**What is never recorded.** Query text, file paths, frontmatter content, or any other argument value. The metrics store holds nothing `wkp forget`/`wkp purge` (7.6, ADR-0007/0008) would ever need to reach, and nothing crosses the process boundary this file lives behind -- nothing here is git-tracked, nothing here is synced (6.1), and nothing here is transmitted to a hub even when one is configured (8.4 covers what the hub records about its own operations, which is a separate dataset).
+
+**Storage mechanism: a fixed-slot ring buffer, not a growing event log.** A conventional `events (ts, tool, duration_ms, ok)` table answers the same questions but grows without bound, needing a periodic prune/VACUUM job this daemonless design (D2) has nowhere to run from. Instead, each `(metric, tier)` pair gets exactly `slot_count` rows, addressed by `slot = bucket_index % slot_count` and written with `UPDATE`, never `INSERT`/`DELETE` -- once every slot has been touched once, the table's page count stops growing for good. This is the same technique RRDtool's own round-robin archives use, implemented directly in SQLite rather than via `librrd` (which would mean linking a C library -- `unsafe` FFI outside `wkp-sys`, forbidden by CLAUDE.md's hard rules) or a from-scratch binary ring-buffer file format (a new on-disk format CLAUDE.md's hard rules also rule out; `.wkp/metrics.db` stays SQLite, the same format `index.db` already uses, just a second file).
+
+Each slot stores `(bucket_start, n, sum, min, max, last)` rather than a single value. This one shape serves both metric kinds `wkp` needs: for a counter (tool invocation), `n` is the call count in that window and `sum/n` gives mean latency for free, alongside min/max; for a gauge (indexed item count), `last` is the value actually worth charting (a gauge's average over a window is rarely meaningful; its current value is), while `n`/min/max show whether it fluctuated within the window. `bucket_start` is what makes a slot's staleness detectable: a reader recomputes the `bucket_start` a slot should hold given the current time and the tier's step size, and treats a mismatch as "no data" rather than serving a value left over from a previous lap around the ring. This is required precisely because sparse, bursty CLI usage means most time windows see no invocation at all -- an idle hour must read as "no data," never as whatever was last written to that slot hours or days earlier.
+
+Three tiers ship as fixed Rust-side constants, not a per-device config (unlike the hub, 8.4, this does not need to be tunable per device):
+
+| tier | step | slots | span | purpose |
+|---|---|---|---|---|
+| raw | 1 min | 360 | 6 hours | "why did this session feel slow" |
+| 15-minute | 15 min | 1,344 | 14 days | recent-history trend |
+| 6-hour | 6 hours | 1,460 | 1 year | long-term trend line only |
+
+Each step divides the next evenly (1 → 15 → 360 minutes) so bucket boundaries align. At roughly 20 metrics (the fixed set of `wkp` subcommands plus a couple of gauges) × 3,164 slots/metric, `.wkp/metrics.db` stabilizes around 3.5-4 MB -- sized for "a session's worth of detail, a couple of weeks of trend, a year of coarse history," not for a continuously-ticking infrastructure counter; RRDtool-style defaults (e.g. a year at hourly resolution) would be roughly 5-8x larger for no benefit a bursty, human/agent-paced CLI would ever query for.
+
+**Bucket closure is tracked by an explicit per-`(metric, tier)` cursor, not by slot reuse.** A naive version of this ring buffer might try to detect "has this bucket closed" purely from whether the slot a new bucket maps to already holds different data -- but consecutive time buckets at a fine step land in *different* slots (raw's minute 0 and minute 1 are slots 0 and 1, not the same slot), so nothing would look closed until the ring physically wrapped, leaving sparse or irregularly-timed usage unflushed into the coarser tiers for however long it takes that exact slot to be revisited. A small `cursors` table (one row per `(metric, tier)` that has ever recorded an event -- bounded by the metric catalog's size, not by event volume) tracks which bucket is currently open independently of where its data physically lives, so a window closes and folds forward the moment the next event for that metric falls outside it, regardless of how infrequently the metric is used.
+
+**Write path: fold-forward on bucket close, no daemon.** One transaction per invocation, at process exit (duration and exit status are both known by then; there is no "start" write). If the event's timestamp falls in the raw slot's already-open window, it's a same-bucket `UPDATE` (`n=n+1`, `sum+=v`, `min`/`max`/`last` updated) -- the common case, O(1). If the slot's stored `bucket_start` belongs to a different (necessarily closed) window, that slot's old contents are folded into the 15-minute tier's corresponding slot first (recursively applying the same same-bucket-or-fold check, which may itself cascade once more into the 6-hour tier), and only then is the raw slot overwritten with a fresh single-sample row. Skipped idle time costs nothing -- a minute with no invocation is never written at all, and the staleness check above is what makes a later read of that gap correct rather than a bug. `PRAGMA journal_mode=WAL; synchronous=NORMAL; busy_timeout=500` keep two concurrent invocations against the same store (two agent sessions, or a human and an agent) from blocking each other for more than a commit; unlike `index.db`, losing the last few metrics samples to a crash is a non-event, which is why `synchronous=NORMAL` (not `FULL`) is an acceptable choice here specifically.
+
+**Failure handling.** A metrics write that errors (locked file, disk full, corrupt database) is logged to stderr and otherwise ignored -- it must never fail the actual command, the same non-fatal, best-effort posture `apply_write_sandbox` already applies to `wkp`'s Landlock hardening (M6-1, `crates/wkp-cli/src/main.rs`). This is instrumentation, not a correctness-bearing subsystem.
+
+**Relationship to open question 11.1.** Section 11's first open question calls for opt-in query/click logging to evaluate BM25 vs. hybrid retrieval quality -- a different dataset (query text, by design, since relevance evaluation needs it) serving a different purpose (retrieval-quality research, not operational visibility) than D11's tool-invocation counters. D11 does not resolve 11.1; if that logging is built later, it is a separate, explicitly opt-in store, not folded into `.wkp/metrics.db`.
 
 ---
 
@@ -483,6 +521,16 @@ Prompt injection through agent-consumed content is **established** as a practica
 | Data | Ciphertext for private items; plaintext `shared` items only. Backup encryption/retention is real hosted-deployment infrastructure this milestone's own scope defers (`docs/plan/milestones.md`'s "Out of scope for M5"), not yet built |
 | Observability | **Gap, not yet built.** No structured "who pushed what ref when" audit-event table exists; the only audit trail today is `connection_reset_events`, scoped narrowly to the reset-all admin action (M5-12) |
 
+### 8.4 D11 (hub half): operational metrics for the hub's own components
+
+**Decision.** `wkp-hub usage [--tenant <id>] [--window ...]` reports the hub's own server-side operations -- front-door request latency, per-tenant `index-worker` run counts and duration, control-plane operation counts -- using the same fixed-slot ring-buffer mechanism 5.5 defines for the client, addressed instead by `(tenant_id, metric, tier, slot)` and stored in the control plane's existing Postgres (8.2), not a new time-series dependency.
+
+**Scope, deliberately narrow: this is not client telemetry ingestion.** A device's `.wkp/metrics.db` (5.5) is never transmitted to the hub, on sync or otherwise. The hub only ever measures what it directly does -- proxying a git request, running a tenant's indexer, handling a control-plane call -- the same boundary 8.2's isolation model already draws between "what the hub's own process does" and "what a tenant's content is." An opt-in path for a device to additionally push its local usage summary to the hub was considered and rejected here: it would be the second network call `wkp` ever makes (after the already-narrow, human-configured `--embed-url` exception, 5.3), it has no consent/wire-format design yet, and nothing in this milestone's scope needs cross-device aggregation badly enough to justify opening that door. Revisit only if a real product need for it shows up.
+
+**Configurable retention, the one place this is a real per-deployment knob.** Unlike the client (5.5's tiers are fixed Rust constants -- one laptop, one usage pattern, nothing to tune), the hub is long-lived and multi-tenant, so a `metrics_config` table lets an operator override step size and slot count per tier without a code change -- e.g. a busier deployment might want finer raw resolution, a quieter one might want longer coarse retention for capacity planning. Defaults match 5.5's numbers unless overridden.
+
+**Distinct from the Observability gap above.** The missing "who pushed what ref when" audit-event table is a security/audit concern (attributing an action to an identity, for incident response) with its own row shape and retention requirements (an audit log should not be a ring buffer that silently overwrites the oldest entries). D11's hub metrics are aggregate operational counters with no identity attribution beyond `tenant_id`, answering "is this slow" and "how much is this tenant using," not "who did this." Building the audit-event table remains open work this ADR does not resolve.
+
 ---
 
 ## 9. Development process and pipeline (agentic maintainers)
@@ -611,6 +659,7 @@ Memory writes from a harness use `wkp remember --type <type> --principal agent:<
 | Billing | Merchant of Record | Direct Stripe | Tax and compliance offload; no card data in core |
 | Distribution | GitHub Releases, Homebrew tap, OCI image | PyPI wheel, `curl \| sh` installer, OS repos | Single current user; optimize the binary, not the installer |
 | Pipeline | Automated gates + human co-sign on critical paths | Agent-only review | Evidence on AI-generated code security |
+| Usage metrics | Fixed-slot SQLite ring buffer, local-only, on by default (ADR-0016) | `librrd` bindings, a growing event log + prune job, opt-in client telemetry to the hub | No new on-disk format or unsafe FFI; bounded size without a daemon; keeps the "no network call outside `--embed-url`" property intact |
 
 ---
 
