@@ -41,6 +41,20 @@ human to promote (`wkp promote`) — see
 [`docs/cli-reference.md`](docs/cli-reference.md) for every subcommand,
 or [`AGENTS.md`](AGENTS.md) for the full write-path walkthrough.
 
+## Usage modes
+
+What you've just done above is **local mode** — one machine, no sync,
+nothing else to set up. Two more modes build on top of it:
+
+- **[Multiple machines, via a private git repo](docs/multi-machine-sync.md)** —
+  clone the same store onto more than one machine, sync through a git
+  remote you already trust (a private GitHub repo, a NAS). No extra
+  service required.
+- **[Hub mode](docs/hub-mode.md)** — a shared, always-on service instead
+  of managing your own git host: device registration and revocation
+  over mTLS, per-tenant isolation. Reach for this over plain sync when
+  you need revocation or multiple people sharing a tenant.
+
 ## Configure your coding agent
 
 ### Claude Code
