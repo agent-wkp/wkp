@@ -494,6 +494,23 @@ impl WindowAcc {
 /// rows: a finer tier's open bucket is by construction more recent than
 /// anything that has ever folded out of it, so nothing it holds has
 /// reached the picked tier's stored rows yet.
+/// Every metric name and kind the catalog currently knows about, ordered
+/// by name -- the starting point for `wkp usage`, which has no other way
+/// to learn what's been recorded (the set of tool names isn't fixed
+/// here, per ADR-0016's own "exact metric catalog... not frozen here").
+pub fn list_metrics(conn: &Connection) -> Result<Vec<(String, MetricKind)>, UsageError> {
+    let mut stmt = conn.prepare("SELECT name, kind FROM metrics ORDER BY name")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (name, kind_str) = row?;
+        let kind = MetricKind::parse(&kind_str)
+            .expect("metrics.kind has a CHECK constraint restricting it to 'counter'/'gauge'");
+        out.push((name, kind));
+    }
+    Ok(out)
+}
+
 pub fn query_window(
     conn: &Connection,
     name: &str,
@@ -678,6 +695,22 @@ mod tests {
         let long_after = 3 * 3600; // 3 hours later
         let s = query_window(&conn, "search", Duration::from_secs(300), at(long_after)).unwrap();
         assert_eq!(s.n, 0);
+    }
+
+    #[test]
+    fn list_metrics_returns_every_recorded_name_and_kind_sorted() {
+        let mut conn = open_test_db();
+        record_counter(&mut conn, "search", Duration::from_millis(1), at(0)).unwrap();
+        record_gauge(&mut conn, "indexed_items", 10.0, at(0)).unwrap();
+
+        let metrics = list_metrics(&conn).unwrap();
+        assert_eq!(
+            metrics,
+            vec![
+                ("indexed_items".to_string(), MetricKind::Gauge),
+                ("search".to_string(), MetricKind::Counter),
+            ]
+        );
     }
 
     #[test]

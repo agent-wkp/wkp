@@ -25,6 +25,7 @@ mod resolve_conflicts;
 mod sandbox;
 mod search;
 mod sync_cmd;
+mod usage_cmd;
 mod wkpd;
 
 #[cfg(test)]
@@ -99,6 +100,7 @@ Commands:
   resolve-conflicts      Resolve a modify/delete conflict pair
   hub register           Register this device with a wkp-hub
   wkpd                   Watch-triggered sync daemon
+  usage                  Show local usage metrics (calls, latency, errors)
 
   --version, -V          Print the version and exit
   --help, -h, help       Print this message and exit
@@ -111,7 +113,18 @@ See AGENTS.md for how an agent should use these, or docs/plan/milestones.md
 for what each one's own acceptance criteria are.\
 ";
 
-fn main() {
+/// The real body of `wkp`: every subcommand's argument parsing, dispatch,
+/// and error handling. Returns the process exit code instead of calling
+/// `std::process::exit` directly (every one of this function's ~70
+/// former direct exit points now `return`s instead) so `main` below can
+/// wrap this call once, record one usage-metrics sample covering the
+/// *whole* invocation regardless of which path through here it took, and
+/// exit with the same code an external caller would have seen either
+/// way -- `std::process::exit` cannot be intercepted after the fact
+/// (it skips destructors and any code following it), so returning a
+/// value is the only way to guarantee the metrics write happens on
+/// every path, not just the successful ones.
+fn dispatch() -> i32 {
     // Dispatching on a CLI flag, not a security-sensitive use of argv.
     let mut args = std::env::args().skip(1); // nosemgrep: rust.lang.security.args.args
     let first = args.next();
@@ -129,23 +142,23 @@ fn main() {
                 let remaining: Vec<String> = args.collect();
                 if remaining.is_empty() {
                     eprintln!("wkp: --sandbox podman requires a command, e.g. `wkp --sandbox podman index`");
-                    std::process::exit(1);
+                    return 1;
                 }
                 match podman_sandbox::run(&remaining) {
-                    Ok(code) => std::process::exit(code),
+                    Ok(code) => return code,
                     Err(msg) => {
                         eprintln!("wkp: --sandbox podman failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 }
             }
             Some(other) => {
                 eprintln!("wkp: unknown --sandbox backend '{other}' (supported: podman)");
-                std::process::exit(1);
+                return 1;
             }
             None => {
                 eprintln!("wkp: --sandbox requires a backend, e.g. `wkp --sandbox podman index`");
-                std::process::exit(1);
+                return 1;
             }
         }
     }
@@ -154,7 +167,7 @@ fn main() {
     match command.as_deref() {
         None => {
             eprintln!("{USAGE}");
-            std::process::exit(1);
+            return 1;
         }
         Some("--help" | "-h" | "help") => {
             println!("{USAGE}");
@@ -165,7 +178,7 @@ fn main() {
         Some("init") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             let path = args
                 .next()
@@ -175,14 +188,14 @@ fn main() {
                 Ok(()) => println!("wkp: initialized store at {}", path.display()),
                 Err(msg) => {
                     eprintln!("wkp: init failed: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("import") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             let path = args
                 .next()
@@ -193,71 +206,71 @@ fn main() {
                 Ok(summary) => println!("{summary}"),
                 Err(msg) => {
                     eprintln!("wkp: import failed: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("search") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match search::parse_search_args(args) {
                 Ok(opts) => match search::run_search(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
                         eprintln!("wkp: search failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("context") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match search::parse_search_args(args) {
                 Ok(opts) => match context::run_context(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
                         eprintln!("wkp: context failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("traverse") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match context::parse_traverse_args(args) {
                 Ok(opts) => match context::run_traverse(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
                         eprintln!("wkp: traverse failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("index") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match index_cmd::parse_index_args(args) {
                 Ok(opts) => {
@@ -266,39 +279,39 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: index failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     }
                 }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("materialize") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match materialize::parse_materialize_args(args) {
                 Ok(opts) => match materialize::run_materialize(&opts) {
                     Ok(()) => {}
                     Err(msg) => {
                         eprintln!("wkp: materialize failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("remember") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match remember::parse_remember_args(args) {
                 Ok(opts) => {
@@ -307,20 +320,20 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: remember failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     }
                 }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("promote") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match promote::parse_promote_args(args) {
                 Ok(opts) => {
@@ -329,13 +342,13 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: promote failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     }
                 }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
@@ -345,12 +358,12 @@ fn main() {
                     Ok(summary) => println!("{summary}"),
                     Err(msg) => {
                         eprintln!("wkp: hub register failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             },
             _ => {
@@ -358,13 +371,13 @@ fn main() {
                     "wkp: usage: wkp hub register --hub-url <url> --tenant <slug> \
                          --ca-cert <path> [--path <dir>]"
                 );
-                std::process::exit(1);
+                return 1;
             }
         },
         Some("forget") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match forget::parse_forget_args(args) {
                 Ok(opts) => {
@@ -383,32 +396,32 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: forget failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     }
                 }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("purge") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match purge::parse_purge_args(args) {
                 Ok(opts) => match purge::run_purge(&opts) {
                     Ok(summary) => println!("{summary}"),
                     Err(msg) => {
                         eprintln!("wkp: purge failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
@@ -421,12 +434,12 @@ fn main() {
                 Ok(text) => println!("{text}"),
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             },
             Err(msg) => {
                 eprintln!("wkp: {msg}");
-                std::process::exit(1);
+                return 1;
             }
         },
         // Deliberately no `ensure_min_git_version` check: git itself
@@ -442,7 +455,7 @@ fn main() {
                     "wkp: merge-driver requires three paths: <ancestor> <ours> <theirs> \
                      (git supplies these itself per its merge-driver protocol)"
                 );
-                std::process::exit(1);
+                return 1;
             };
             if let Err(msg) = merge_driver::run_merge_driver(
                 Path::new(&ancestor),
@@ -450,7 +463,7 @@ fn main() {
                 Path::new(&theirs),
             ) {
                 eprintln!("wkp: merge-driver failed: {msg}");
-                std::process::exit(1);
+                return 1;
             }
         }
         // Deliberately no `ensure_min_git_version` check, same reasoning
@@ -481,7 +494,7 @@ fn main() {
                     }
                     Err(msg) => {
                         eprintln!("wkp: filter clean failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Some("smudge") => {
@@ -492,14 +505,14 @@ fn main() {
                 }
                 _ => {
                     eprintln!("wkp: filter requires a direction: clean|smudge");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("resolve-conflicts") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match resolve_conflicts::parse_resolve_conflicts_args(args) {
                 Ok(path) => match resolve_conflicts::resolve_modify_delete_conflicts(&path) {
@@ -513,19 +526,19 @@ fn main() {
                     }
                     Err(msg) => {
                         eprintln!("wkp: resolve-conflicts failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("sync") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             // `wkp sync status` is a sub-subcommand; anything else (or
             // nothing at all) falls through to the ordinary `wkp sync
@@ -542,12 +555,12 @@ fn main() {
                         }
                         Err(msg) => {
                             eprintln!("wkp: sync status failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     },
                     Err(msg) => {
                         eprintln!("wkp: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 }
             } else {
@@ -557,12 +570,12 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: sync failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     },
                     Err(msg) => {
                         eprintln!("wkp: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 }
             }
@@ -570,7 +583,7 @@ fn main() {
         Some("bundle") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match args.next().as_deref() {
                 Some("export") => match bundle::parse_bundle_export_args(args) {
@@ -578,12 +591,12 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: bundle export failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     },
                     Err(msg) => {
                         eprintln!("wkp: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 Some("import") => match bundle::parse_bundle_import_args(args) {
@@ -591,40 +604,56 @@ fn main() {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
                             eprintln!("wkp: bundle import failed: {msg}");
-                            std::process::exit(1);
+                            return 1;
                         }
                     },
                     Err(msg) => {
                         eprintln!("wkp: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 },
                 other => {
                     eprintln!(
                         "wkp: bundle requires a subcommand: export or import (got {other:?})"
                     );
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
         Some("wkpd") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
-                std::process::exit(1);
+                return 1;
             }
             match wkpd::parse_wkpd_args(args) {
                 Ok(opts) => {
                     if let Err(msg) = wkpd::run_wkpd(&opts) {
                         eprintln!("wkp: wkpd failed: {msg}");
-                        std::process::exit(1);
+                        return 1;
                     }
                 }
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
-                    std::process::exit(1);
+                    return 1;
                 }
             }
         }
+        // Deliberately no `ensure_min_git_version` check, same reasoning
+        // as `hooks` above: `wkp usage` only ever reads `.wkp/metrics.db`
+        // directly via `wkp_core::usage`, never `wkp-git` plumbing.
+        Some("usage") => match usage_cmd::parse_usage_args(args) {
+            Ok(opts) => match usage_cmd::run_usage(&opts) {
+                Ok(output) => println!("{output}"),
+                Err(msg) => {
+                    eprintln!("wkp: usage failed: {msg}");
+                    return 1;
+                }
+            },
+            Err(msg) => {
+                eprintln!("wkp: {msg}");
+                return 1;
+            }
+        },
         // Undocumented on purpose (M6-1, issue #170): not real user
         // subcommands, just a way for `tests/sandbox_integration.rs`
         // to exercise `sandbox.rs`'s two functions as real subprocesses
@@ -637,17 +666,17 @@ fn main() {
         Some("__sandbox-self-test-write") => {
             let (Some(allowed), Some(denied)) = (args.next(), args.next()) else {
                 eprintln!("wkp: usage: wkp __sandbox-self-test-write <allowed-dir> <denied-dir>");
-                std::process::exit(2);
+                return 2;
             };
             if let Err(e) = sandbox::restrict_writes_to(&[Path::new(&allowed)]) {
                 eprintln!("SANDBOX_SETUP_ERROR: {e}");
-                std::process::exit(2);
+                return 2;
             }
             let inside_ok = std::fs::write(Path::new(&allowed).join("ok.txt"), b"ok").is_ok();
             let outside_denied =
                 std::fs::write(Path::new(&denied).join("nope.txt"), b"nope").is_err();
             println!("INSIDE_WRITE_OK={inside_ok} OUTSIDE_WRITE_DENIED={outside_denied}");
-            std::process::exit(if inside_ok && outside_denied { 0 } else { 1 });
+            return if inside_ok && outside_denied { 0 } else { 1 };
         }
         Some("__sandbox-self-test-syscalls") => {
             // Takes a directory to probe into rather than reaching for
@@ -663,11 +692,11 @@ fn main() {
             // its own claim about temp-file safety.
             let Some(probe_dir) = args.next() else {
                 eprintln!("wkp: usage: wkp __sandbox-self-test-syscalls <writable-dir>");
-                std::process::exit(2);
+                return 2;
             };
             if let Err(e) = sandbox::restrict_dangerous_syscalls() {
                 eprintln!("SANDBOX_SETUP_ERROR: {e}");
-                std::process::exit(2);
+                return 2;
             }
             // Only a *safe* probe is possible in this crate (see the
             // comment above `Some("__sandbox-self-test-write")`):
@@ -678,14 +707,81 @@ fn main() {
             let ordinary_write_ok =
                 std::fs::write(Path::new(&probe_dir).join("ok.txt"), b"ok").is_ok();
             println!("ORDINARY_WRITE_OK={ordinary_write_ok}");
-            std::process::exit(if ordinary_write_ok { 0 } else { 1 });
+            return if ordinary_write_ok { 0 } else { 1 };
         }
         Some(unknown) => {
             eprintln!("wkp: unknown subcommand '{unknown}'\n");
             eprintln!("{USAGE}");
-            std::process::exit(1);
+            return 1;
         }
     }
+
+    // Reached only by an arm above that didn't `return` early -- every
+    // such arm is a success path (`--help`/`--version`, or a subcommand
+    // whose own `Ok(..)` branch just printed and fell through).
+    0
+}
+
+/// `.wkp/metrics.db`'s counter name for one subcommand's exit status.
+/// Two counters share one tool rather than widening the ring buffer's row
+/// shape (design 5.5) to carry a success/failure split directly: `<tool>`
+/// always gets one sample (every invocation, successful or not), and
+/// `<tool>.err` gets a second sample *only* when the exit code was
+/// nonzero. `wkp usage` (or any other reader) recovers the failure count
+/// from `<tool>.err`'s own `n` and the success count as `<tool>`'s `n`
+/// minus `<tool>.err`'s `n` -- no schema change needed if a future metric
+/// needs the same treatment.
+fn error_metric_name(tool: &str) -> String {
+    format!("{tool}.err")
+}
+
+/// Best-effort: records one subcommand invocation's latency and exit
+/// status into `.wkp/metrics.db`, on by default (design 5.5, ADR-0016).
+/// Never touches anything if the current directory isn't already an
+/// initialized store (`.wkp/` doesn't exist) -- this must never be the
+/// reason a `.wkp/` directory gets created, only ever piggyback on one
+/// that's already there. Never lets a metrics-write failure (a locked
+/// file, a full disk, anything) affect the real command's own exit code
+/// -- this is instrumentation, not a correctness-bearing subsystem.
+///
+/// `tool` is `argv[1]` verbatim (whatever `main` resolved before calling
+/// `dispatch`), including flags like `--help`. The one thing intentionally
+/// *not* handled here: `wkp --sandbox podman index` records under the
+/// tool name `--sandbox`, not `index` -- the real subcommand is one level
+/// deeper than `main` peeks, and resolving it accurately isn't worth the
+/// extra complexity for what's still an approximate, best-effort signal.
+fn record_invocation(tool: &str, elapsed: std::time::Duration, exit_code: i32) {
+    if tool.is_empty() {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let wkp_dir = cwd.join(".wkp");
+    if !wkp_dir.is_dir() {
+        return;
+    }
+    let Ok(mut conn) = wkp_core::usage::open_usage_db(&wkp_dir.join("metrics.db")) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let _ = wkp_core::usage::record_counter(&mut conn, tool, elapsed, now);
+    if exit_code != 0 {
+        let _ = wkp_core::usage::record_counter(&mut conn, &error_metric_name(tool), elapsed, now);
+    }
+}
+
+fn main() {
+    let start = std::time::Instant::now();
+    // A second, independent read of argv (not the one `dispatch` itself
+    // consumes) purely to name the metric this invocation records --
+    // `std::env::args()` can be called any number of times, each
+    // yielding a fresh iterator over the same process arguments, so this
+    // never disturbs `dispatch`'s own parsing.
+    let tool = std::env::args().nth(1).unwrap_or_default();
+    let code = dispatch();
+    record_invocation(&tool, start.elapsed(), code);
+    std::process::exit(code);
 }
 
 /// Writes `content` to `dest` via a temp file in the same directory,
