@@ -75,9 +75,10 @@ this task -- see `docs/plan/milestones.md`'s M0-6 entry.
 
 ## Release availability vs. what CI verifies
 
-Two of the four targets this doc covers are CI-verified but not actually
+One of the four targets this doc covers is CI-verified but not actually
 published in [GitHub Releases](https://github.com/agent-wkp/wkp/releases)
-yet -- worth knowing apart from "does it build":
+yet; a second isn't attempted at all -- two different things, worth
+keeping apart from "does it build":
 
 - **`aarch64-unknown-linux-musl` (Linux arm64):** built and
   static-link-checked on every push (`rust-ci.yml`'s cross-compile job),

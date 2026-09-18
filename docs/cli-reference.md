@@ -40,7 +40,11 @@ for opt-in hybrid search (Reciprocal Rank Fusion between BM25 and
 embedding cosine similarity against an OpenAI-compatible endpoint) —
 requires a binary built with the `embed` Cargo feature and embeddings
 already computed via `wkp index --embed-url ...`. Never called by
-default; the only path in `wkp` that makes a network call at all.
+default — the only network call anywhere in the read path (`search`/
+`context`/`traverse`/`materialize`/`index`). `sync`, `bundle`, and
+`hub register` are network operations too, by design (that's their
+whole job); this flag is specifically about the read/search path never
+reaching out unless you opt in.
 
 ### `wkp context <query> [--tier N] [--budget N] [-k/--limit N] [--format text|paths|json] [--path DIR]`
 

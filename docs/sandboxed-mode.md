@@ -8,9 +8,14 @@ restricted to your resolved store path (covering the index and git's
 object directory for free, since both live under it), and a seccomp
 denylist blocks a short list of syscalls no normal `wkp` operation has a
 legitimate reason to call (`ptrace`, `mount`, module loading, and
-others). Read-only commands (`search`/`context`/`materialize`) are
-untouched — nothing to protect on the write side, and the latency budget
-for that hot path doesn't have room for extra syscalls.
+others). `search`/`context`/`traverse` (genuinely read-only — no writes
+at all) are untouched — nothing to protect there, and the latency
+budget for that hot path doesn't have room for extra syscalls.
+`materialize` is *not* in that read-only group — it does write
+`.wkp/tier{N}.md` — but its output path is narrow and fixed enough
+(always inside the store's own `.wkp/`) that it isn't included in the
+sandboxed set either; the write-restriction exists for the four
+commands above that write anywhere else in the store.
 
 Best-effort by design: an older or unsupported kernel logs a warning to
 stderr and continues rather than refusing to run.
