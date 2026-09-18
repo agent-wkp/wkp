@@ -84,13 +84,26 @@ fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn get_or_create_metric(conn: &Connection, name: &str, kind: MetricKind) -> rusqlite::Result<i64> {
-    if let Some(id) = conn
-        .query_row("SELECT id FROM metrics WHERE name = ?1", [name], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()?
-    {
+fn get_or_create_metric(
+    conn: &Connection,
+    name: &str,
+    kind: MetricKind,
+) -> Result<i64, UsageError> {
+    let existing = conn
+        .query_row(
+            "SELECT id, kind FROM metrics WHERE name = ?1",
+            [name],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((id, stored_kind)) = existing {
+        if stored_kind != kind.as_str() {
+            return Err(UsageError::MetricKindMismatch {
+                name: name.to_string(),
+                requested: kind,
+                stored: stored_kind,
+            });
+        }
         return Ok(id);
     }
     conn.execute(
@@ -416,16 +429,51 @@ impl MetricSummary {
     }
 }
 
-/// The finest tier whose full span (`step_secs * slots`) still covers
-/// `window_secs`, so a query for "the last hour" doesn't get answered out
-/// of the 6-hour tier when the 1-minute tier already covers it. Falls
-/// back to the coarsest tier for a window wider than anything retains
-/// (a best-effort answer over whatever history remains, not an error).
-fn pick_tier(window_secs: i64) -> &'static super::schema::Tier {
+/// The finest tier index whose full span (`step_secs * slots`) still
+/// covers `window_secs`, so a query for "the last hour" doesn't get
+/// answered out of the 6-hour tier when the 1-minute tier already covers
+/// it. Falls back to the coarsest tier for a window wider than anything
+/// retains (a best-effort answer over whatever history remains, not an
+/// error).
+fn pick_tier_idx(window_secs: i64) -> usize {
     TIERS
         .iter()
-        .find(|t| t.step_secs * t.slots >= window_secs)
-        .unwrap_or(&TIERS[TIERS.len() - 1])
+        .position(|t| t.step_secs * t.slots >= window_secs)
+        .unwrap_or(TIERS.len() - 1)
+}
+
+#[derive(Default)]
+struct WindowAcc {
+    n: i64,
+    sum: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    last: f64,
+    last_at: Option<i64>,
+}
+
+impl WindowAcc {
+    fn absorb(&mut self, bucket_start: i64, agg: &SlotAgg) {
+        self.n += agg.n;
+        self.sum += agg.sum;
+        self.min = Some(self.min.map_or(agg.min, |m| m.min(agg.min)));
+        self.max = Some(self.max.map_or(agg.max, |m| m.max(agg.max)));
+        if self.last_at.is_none_or(|la| bucket_start > la) {
+            self.last = agg.last;
+            self.last_at = Some(bucket_start);
+        }
+    }
+
+    fn into_summary(self) -> MetricSummary {
+        MetricSummary {
+            n: self.n,
+            sum: self.sum,
+            min: self.min.unwrap_or(0.0),
+            max: self.max.unwrap_or(0.0),
+            last: self.last,
+            last_at: self.last_at,
+        }
+    }
 }
 
 /// Aggregates one metric's live data over the trailing `window`, ending
@@ -434,6 +482,18 @@ fn pick_tier(window_secs: i64) -> &'static super::schema::Tier {
 /// its row still physically exists — this is what makes an idle period
 /// read back as "no data" rather than a previous lap's leftover value
 /// (design 5.5).
+///
+/// A wide window is answered out of a coarse tier (`pick_tier_idx`), but
+/// that tier only ever receives a finer tier's data once that finer
+/// tier's own window *closes* — so the most recent slice of activity, for
+/// however long the finest-relevant window has been open, would otherwise
+/// be invisible to a query that (correctly) reads from the coarse tier
+/// for its long retention. Each finer tier below the picked one
+/// contributes its own currently-open cursor bucket to cover exactly that
+/// gap. This can never double-count against the picked tier's own stored
+/// rows: a finer tier's open bucket is by construction more recent than
+/// anything that has ever folded out of it, so nothing it holds has
+/// reached the picked tier's stored rows yet.
 pub fn query_window(
     conn: &Connection,
     name: &str,
@@ -453,52 +513,45 @@ pub fn query_window(
     let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
     let window_secs = window.as_secs() as i64;
     let cutoff = now_secs - window_secs;
-    let tier = pick_tier(window_secs);
+    let picked_idx = pick_tier_idx(window_secs);
+    let tier = &TIERS[picked_idx];
 
-    let mut stmt = conn.prepare(&format!(
-        "SELECT bucket_start, n, sum, min, max, last FROM {} \
-         WHERE metric_id = ?1 AND bucket_start >= ?2",
-        tier.table
-    ))?;
-    let rows = stmt.query_map(rusqlite::params![metric_id, cutoff], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            SlotAgg {
-                n: r.get(1)?,
-                sum: r.get(2)?,
-                min: r.get(3)?,
-                max: r.get(4)?,
-                last: r.get(5)?,
-            },
-        ))
-    })?;
-
-    let mut n = 0i64;
-    let mut sum = 0.0;
-    let mut min: Option<f64> = None;
-    let mut max: Option<f64> = None;
-    let mut last = 0.0;
-    let mut last_at: Option<i64> = None;
-    for row in rows {
-        let (bucket_start, agg) = row?;
-        n += agg.n;
-        sum += agg.sum;
-        min = Some(min.map_or(agg.min, |m| m.min(agg.min)));
-        max = Some(max.map_or(agg.max, |m| m.max(agg.max)));
-        if last_at.is_none_or(|la| bucket_start > la) {
-            last = agg.last;
-            last_at = Some(bucket_start);
+    let mut acc = WindowAcc::default();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT bucket_start, n, sum, min, max, last FROM {} \
+             WHERE metric_id = ?1 AND bucket_start >= ?2",
+            tier.table
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![metric_id, cutoff], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                SlotAgg {
+                    n: r.get(1)?,
+                    sum: r.get(2)?,
+                    min: r.get(3)?,
+                    max: r.get(4)?,
+                    last: r.get(5)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (bucket_start, agg) = row?;
+            acc.absorb(bucket_start, &agg);
         }
     }
 
-    Ok(MetricSummary {
-        n,
-        sum,
-        min: min.unwrap_or(0.0),
-        max: max.unwrap_or(0.0),
-        last,
-        last_at,
-    })
+    for (finer_idx, finer_tier) in TIERS.iter().enumerate().take(picked_idx) {
+        if let Some(cursor) = fetch_cursor(conn, metric_id, finer_idx)? {
+            if cursor.bucket_start >= cutoff {
+                if let Some(slot) = fetch_slot(conn, finer_tier.table, metric_id, cursor.slot)? {
+                    acc.absorb(cursor.bucket_start, &slot.agg);
+                }
+            }
+        }
+    }
+
+    Ok(acc.into_summary())
 }
 
 #[cfg(test)]
@@ -633,6 +686,36 @@ mod tests {
         let s = query_window(&conn, "never-recorded", Duration::from_secs(3600), at(0)).unwrap();
         assert_eq!(s.n, 0);
         assert_eq!(s.last_at, None);
+    }
+
+    #[test]
+    fn recording_a_metric_under_two_kinds_is_rejected() {
+        let mut conn = open_test_db();
+        record_counter(&mut conn, "search", Duration::from_millis(10), at(5)).unwrap();
+        let err = record_gauge(&mut conn, "search", 42.0, at(10)).unwrap_err();
+        assert!(
+            matches!(err, UsageError::MetricKindMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_window_query_still_sees_data_not_yet_folded_out_of_a_finer_tier() {
+        let mut conn = open_test_db();
+        // A single, very recent sample: still sitting in raw's own
+        // currently-open cursor bucket, not yet folded into agg_15m or
+        // agg_6h at all (nothing has closed that bucket yet).
+        record_counter(&mut conn, "search", Duration::from_millis(10), at(5)).unwrap();
+
+        // A 20-day window can only be answered out of agg_6h (agg_15m's
+        // own 14-day span doesn't cover it) -- but agg_6h has no rows for
+        // this metric yet at all. Without folding in raw's still-open
+        // cursor, this would wrongly read back as "no data".
+        let window = Duration::from_secs(20 * 24 * 3600);
+        let s = query_window(&conn, "search", window, at(10)).unwrap();
+        assert_eq!(s.n, 1);
+        assert_eq!(s.sum, 10.0);
+        assert_eq!(s.last, 10.0);
     }
 
     #[test]

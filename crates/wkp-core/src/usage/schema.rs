@@ -65,6 +65,18 @@ impl MetricKind {
 pub enum UsageError {
     Sqlite(rusqlite::Error),
     Time(std::time::SystemTimeError),
+    /// A caller tried to record a sample for `name` as `requested`, but
+    /// the metrics catalog already has that name registered as
+    /// `stored` — e.g. `record_counter` and `record_gauge` called on the
+    /// same metric name. A metric's kind decides which column (`sum/n`
+    /// vs. `last`) a reader treats as meaningful, so silently accepting
+    /// either kind under one name would make `wkp usage`'s output
+    /// meaningless for that metric without ever raising an error.
+    MetricKindMismatch {
+        name: String,
+        requested: MetricKind,
+        stored: String,
+    },
 }
 
 impl fmt::Display for UsageError {
@@ -72,6 +84,15 @@ impl fmt::Display for UsageError {
         match self {
             UsageError::Sqlite(e) => write!(f, "sqlite error: {e}"),
             UsageError::Time(e) => write!(f, "system time error: {e}"),
+            UsageError::MetricKindMismatch {
+                name,
+                requested,
+                stored,
+            } => write!(
+                f,
+                "metric '{name}' is already registered as '{stored}', cannot record it as '{}'",
+                requested.as_str()
+            ),
         }
     }
 }
