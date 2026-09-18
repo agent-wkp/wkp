@@ -72,3 +72,24 @@ otool -L target/aarch64-apple-darwin/release/wkp
 
 Signing and multi-arch manifest publishing are M6 (release hardening), not
 this task -- see `docs/plan/milestones.md`'s M0-6 entry.
+
+## Release availability vs. what CI verifies
+
+Two of the four targets this doc covers are CI-verified but not actually
+published in [GitHub Releases](https://github.com/agent-wkp/wkp/releases)
+yet -- worth knowing apart from "does it build":
+
+- **`aarch64-unknown-linux-musl` (Linux arm64):** built and
+  static-link-checked on every push (`rust-ci.yml`'s cross-compile job),
+  but its `cross`-based build isn't currently reproducible (two
+  independent runners don't produce byte-identical output), so the
+  release pipeline drops it rather than ship an unverifiable artifact.
+  See `docs/plan/milestones.md`'s M6 task 3 for the real root-cause
+  candidate.
+- **`x86_64-apple-darwin` (macOS Intel):** not attempted at all. Not
+  planned -- macOS Intel is treated as a legacy platform this project
+  doesn't target going forward, not a "coming later" gap.
+
+`x86_64-unknown-linux-musl` and `aarch64-apple-darwin` are the two
+targets actually released, matching what the README's own Install
+section documents.
