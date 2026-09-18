@@ -52,6 +52,13 @@ pub(crate) fn run_init_with_claude_home(
             // than repeating M3-1's device-id oversight (that one
             // wasn't gitignored until M3-7 found it the hard way).
             ".wkp/device-identity",
+            // Design 5.5 / ADR-0016: local usage metrics. Derived,
+            // local-only, never synced (same reasoning as `index.db`
+            // above) -- the glob also covers WAL mode's `-wal`/`-shm`
+            // sidecar files (`wkp_core::usage::open_usage_db`), added
+            // from the start this time rather than repeating the
+            // device-id/tier1.md oversights above.
+            ".wkp/metrics.db*",
         ],
     )?;
 
@@ -244,6 +251,7 @@ mod tests {
         let gitignore = std::fs::read_to_string(dir.join(".gitignore")).expect("read .gitignore");
         assert!(gitignore.contains(".wkp/index.db"));
         assert!(gitignore.contains(".wkp/tier*.md"));
+        assert!(gitignore.contains(".wkp/metrics.db*"));
 
         // The freshly built index is a valid, queryable database.
         let conn =

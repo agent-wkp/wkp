@@ -9,3 +9,4 @@ pub mod graph;
 pub mod index;
 pub mod merge;
 pub mod secrets;
+pub mod usage;
