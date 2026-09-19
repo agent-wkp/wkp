@@ -35,6 +35,14 @@ BM25 full-text search over `index.db`. `--budget` stops once estimated
 token cost exceeds N. `--format paths` is the form to feed into a
 Read-tool call.
 
+`<query>` is a plain-language lookup, not an FTS5 query expression: every
+character in it (`.`, `-`, `:`, quotes, bareword `AND`/`OR`/`NOT`, ...)
+is matched as literal text, so `wkp search "RHOAI 3.6 release dates"` or
+`wkp search "file-name.ext"` works exactly as typed rather than raising
+an FTS5 syntax error or being parsed as a boolean/column-filter
+expression. An empty or whitespace-only query returns no results rather
+than erroring.
+
 Also accepts `--embed-url URL [--embed-model NAME] [--embed-key-file PATH]`
 for opt-in hybrid search (Reciprocal Rank Fusion between BM25 and
 embedding cosine similarity against an OpenAI-compatible endpoint) —
