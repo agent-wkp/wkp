@@ -40,6 +40,26 @@ pub struct SearchHit {
     pub hop_distance: u32,
 }
 
+/// Rewrites a raw user query into an FTS5 query expression that behaves
+/// like a plain bag-of-words search, immune to FTS5's own query-syntax
+/// characters. `wkp search`/`context` are documented (cli-reference.md)
+/// as plain-language lookups, not an exposed FTS5 query language -- a
+/// user typing `RHOAI 3.6 release dates` expects an ordinary keyword
+/// search, not an `fts5: syntax error near "."` because `.` isn't a
+/// valid bareword character there. Each whitespace-separated word
+/// becomes its own quoted phrase (doubling any embedded `"` per FTS5's
+/// own phrase-escaping rule), so column filters (`title:x`), boolean
+/// operators (`AND`/`OR`/`NOT`), and prefix/proximity syntax typed as a
+/// bareword are all treated as literal text instead of being parsed.
+/// Adjacent phrases keep FTS5's default implicit AND, so ranking and
+/// matching for ordinary alphabetic queries is unchanged.
+fn sanitize_fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Runs a BM25 full-text query against the `items` table, applying the
 /// tier/metadata filters in `filter` (design 5.3), then truncates to
 /// `filter.budget` estimated tokens if set. Results are ordered by score,
@@ -49,12 +69,22 @@ pub fn search(
     query: &str,
     filter: &SearchFilter,
 ) -> Result<Vec<SearchHit>, IndexError> {
+    let sanitized = sanitize_fts_query(query);
+    // An empty or whitespace-only query has no terms to match against --
+    // binding `""` to `MATCH` is itself invalid FTS5 syntax (`fts5: syntax
+    // error near ""`), so short-circuit to "no results" rather than
+    // letting that reach SQLite as a second flavor of the same bug this
+    // function exists to fix.
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let (w_path, w_title, w_content, w_tags) = BM25_WEIGHTS;
     let mut sql = format!(
         "SELECT path, title, -bm25(items, {w_path}, {w_title}, {w_content}, {w_tags}) AS score, \
          tier, tokens_estimate FROM items WHERE items MATCH ?"
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(sanitized)];
 
     if let Some(v) = &filter.item_type {
         sql.push_str(" AND item_type = ?");
@@ -646,6 +676,100 @@ mod tests {
         let conn = build_in_memory(&[]).expect("build in-memory index");
         let rendered = materialize(&conn, 0).expect("materialize empty tier 0");
         assert_eq!(rendered, "<wkp-context tier=\"0\">\n\n</wkp-context>\n");
+    }
+
+    #[test]
+    fn sanitize_fts_query_quotes_each_word_and_escapes_embedded_quotes() {
+        assert_eq!(
+            sanitize_fts_query("RHOAI 3.6 release dates"),
+            "\"RHOAI\" \"3.6\" \"release\" \"dates\""
+        );
+        assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"\"\"hi\"\"\"");
+        assert_eq!(sanitize_fts_query(""), "");
+    }
+
+    /// Regression test: a bareword containing `.` (e.g. a version number)
+    /// used to hit FTS5's own query parser directly and fail with a raw
+    /// `fts5: syntax error near "."` instead of returning results, since
+    /// `.` is not a valid bareword character in FTS5's default query
+    /// grammar. `search` is documented as a plain-language lookup, so this
+    /// must find the match rather than error.
+    #[test]
+    fn search_handles_a_query_containing_a_version_number() {
+        let items = vec![item(
+            "project_rhoai36_release_dates.md",
+            "RHOAI 3.6 Release Dates",
+            "RHOAI 3.6 release dates and schedule",
+        )];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        let hits = search(&conn, "RHOAI 3.6 release dates", &SearchFilter::default())
+            .expect("search must not fail on a query containing a period");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "project_rhoai36_release_dates.md");
+    }
+
+    /// Other FTS5-special characters (column-filter colon, boolean
+    /// bareword, hyphen) must be treated as literal query text too, not
+    /// parsed as FTS5 syntax.
+    #[test]
+    fn search_handles_other_fts5_special_characters() {
+        let items = vec![item(
+            "notes.md",
+            "Notes",
+            "the file-name.ext and a colon: value and the word AND appear here",
+        )];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+
+        let hits =
+            search(&conn, "file-name.ext", &SearchFilter::default()).expect("hyphenated query");
+        assert_eq!(hits.len(), 1);
+
+        let hits = search(&conn, "colon: value", &SearchFilter::default())
+            .expect("query containing a colon");
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// A query that is itself an FTS5 boolean bareword must be matched as
+    /// literal text, not parsed as the `AND` operator (which alone, with
+    /// no operands, is also invalid FTS5 syntax on its own).
+    #[test]
+    fn search_treats_a_bareword_boolean_operator_query_as_literal_text() {
+        let items = vec![
+            item(
+                "has-and.md",
+                "Has And",
+                "the word AND appears in this document",
+            ),
+            item(
+                "unrelated.md",
+                "Unrelated",
+                "this document does not contain that term",
+            ),
+        ];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+
+        let hits = search(&conn, "AND", &SearchFilter::default())
+            .expect("a bareword boolean operator query must not error");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "has-and.md");
+    }
+
+    /// An empty or whitespace-only query has no terms to match -- it must
+    /// return no results rather than reaching SQLite as `MATCH ""`, which
+    /// is itself an FTS5 syntax error.
+    #[test]
+    fn search_with_an_empty_or_whitespace_only_query_returns_no_results() {
+        let items = vec![item("a.md", "A", "some content")];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+
+        assert_eq!(
+            search(&conn, "", &SearchFilter::default()).expect("empty query"),
+            vec![]
+        );
+        assert_eq!(
+            search(&conn, "   ", &SearchFilter::default()).expect("whitespace-only query"),
+            vec![]
+        );
     }
 
     #[test]
