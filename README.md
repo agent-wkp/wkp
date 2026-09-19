@@ -40,6 +40,9 @@ That covers reading. Agents also write memory (`wkp remember`) for a
 human to promote (`wkp promote`) — see
 [`docs/cli-reference.md`](docs/cli-reference.md) for every subcommand,
 or [`AGENTS.md`](AGENTS.md) for the full write-path walkthrough.
+`wkp search`/`wkp context` treat the query as plain text, so
+punctuation like `RHOAI 3.6` or `file-name.ext` searches literally
+instead of raising a query-syntax error.
 
 ## Usage modes
 
