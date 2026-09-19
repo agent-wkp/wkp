@@ -73,6 +73,23 @@ Rescans the store and updates `index.db` incrementally, using git's own
 change detection to hash only what changed. Only `.md` files are
 indexed. Safe to run any time; cheap after a single-file edit.
 
+## Usage metrics
+
+### `wkp usage [--window 1h|1d|7d|30d] [--tool NAME] [--path DIR] [--json]`
+
+Reads `.wkp/metrics.db` back: per-tool invocation count, error count,
+and avg/min/max latency for every subcommand run against this store (a
+gauge, like an indexed-item count, instead reports sample count, last
+value, and min/max). `--window` defaults to `1d`; `--tool` filters to
+one metric by name.
+
+Recorded automatically for every subcommand invocation against an
+already-initialized store — on by default, nothing to opt into, and
+nothing ever leaves the machine (a fixed-size local SQLite ring buffer,
+never synced, never transmitted even when a hub is configured). A
+metric with no activity in the requested window is omitted rather than
+shown as a misleading row of zeros.
+
 ## Writing
 
 ### `wkp remember --type <type> --principal <principal> --signing-key-file <path> [--scope <scope>] [--title <title>] [--session <session>] [--path <dir>]`
