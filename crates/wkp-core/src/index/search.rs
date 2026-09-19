@@ -53,9 +53,19 @@ pub struct SearchHit {
 /// bareword are all treated as literal text instead of being parsed.
 /// Adjacent phrases keep FTS5's default implicit AND, so ranking and
 /// matching for ordinary alphabetic queries is unchanged.
+///
+/// Each phrase gets a trailing `*` for prefix matching (`"ubi"*`, valid
+/// FTS5 syntax immediately after a closing quote): `unicode61` treats a
+/// letter-digit run as one token, so content like `UBI8`/`UBI9-minimal`
+/// never contains a bare `ubi` token, and exact-match-only search would
+/// silently return nothing for the query a user actually meant. Real
+/// hits still rank ahead of prefix-only hits via BM25's own term-
+/// frequency weighting, so this trades a little precision on short
+/// common words for not missing the obvious match on identifiers,
+/// versions, and filenames.
 fn sanitize_fts_query(raw: &str) -> String {
     raw.split_whitespace()
-        .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
+        .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -682,9 +692,9 @@ mod tests {
     fn sanitize_fts_query_quotes_each_word_and_escapes_embedded_quotes() {
         assert_eq!(
             sanitize_fts_query("RHOAI 3.6 release dates"),
-            "\"RHOAI\" \"3.6\" \"release\" \"dates\""
+            "\"RHOAI\"* \"3.6\"* \"release\"* \"dates\"*"
         );
-        assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"\"\"hi\"\"\"");
+        assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\"* \"\"\"hi\"\"\"*");
         assert_eq!(sanitize_fts_query(""), "");
     }
 
@@ -706,6 +716,31 @@ mod tests {
             .expect("search must not fail on a query containing a period");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "project_rhoai36_release_dates.md");
+    }
+
+    /// Regression test: `unicode61` treats a letter-digit run as one
+    /// token, so content mentioning `UBI8`/`UBI9-minimal` never contains a
+    /// bare `ubi` token -- an exact-match-only query for "ubi" used to
+    /// return no results even though the term is right there as a
+    /// substring. Prefix matching (`sanitize_fts_query`'s trailing `*`)
+    /// must find it, while still ranking a document containing the exact
+    /// standalone word ahead of a prefix-only match (BM25's own term-
+    /// frequency weighting, not special-cased here).
+    #[test]
+    fn search_finds_a_prefix_of_a_larger_token_like_a_version_suffixed_identifier() {
+        let items = vec![
+            item(
+                "ubi-images.md",
+                "Base Images",
+                "Uses UBI8 as the base image, also mentions UBI9-minimal",
+            ),
+            item("unrelated.md", "Unrelated", "nothing relevant here"),
+        ];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        let hits =
+            search(&conn, "ubi", &SearchFilter::default()).expect("a prefix query must not error");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "ubi-images.md");
     }
 
     /// Other FTS5-special characters (column-filter colon, boolean
