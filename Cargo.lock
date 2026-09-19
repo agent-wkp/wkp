@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "injection-corpus"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "tempfile",
  "wkp-core",
@@ -4191,7 +4191,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wkp-cli"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "landlock",
  "libc",
@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "wkp-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "criterion",
  "regex",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "wkp-crypto"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "age",
  "apple-native-keyring-store",
@@ -4237,14 +4237,14 @@ dependencies = [
 
 [[package]]
 name = "wkp-git"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "wkp-hub"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "axum",
  "axum-server",
@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "wkp-sys"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "rusqlite",
 ]
