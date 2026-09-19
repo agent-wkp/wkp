@@ -214,8 +214,10 @@ fn main() {
                 eprintln!("wkp-hub: usage: wkp-hub index-tenant <tenant-slug>");
                 std::process::exit(1);
             };
+            let start = std::time::Instant::now();
             match tenant_repo::index_tenant(&repos_root(), &tenant_slug) {
                 Ok(summary) => {
+                    record_index_tenant_usage(&tenant_slug, start.elapsed(), summary.indexed.len());
                     println!(
                         "wkp-hub: indexed {} item(s) for tenant {tenant_slug}, skipped {} \
                          private item(s)",
@@ -627,6 +629,103 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        // Design 8.4 (ADR-0016): reads the hub's own operational usage
+        // metrics back -- currently only `index-tenant`'s own duration
+        // (see `record_index_tenant_usage` below); the front door's
+        // request latency is real follow-up scope, not yet wired in.
+        // `--tenant` is required (not optional the way the client's
+        // `wkp usage --tool` filter is): `usage_ring.tenant_id` is
+        // `NOT NULL`, so there is no single-metric cross-tenant view to
+        // fall back to without iterating every tenant, out of scope
+        // here.
+        Some("usage") => {
+            let mut args = args;
+            let first = args.next();
+            // `wkp-hub usage set-tier-config <tier-idx> <step-secs>
+            // <slots>`: the operator-facing knob design 8.4 calls the
+            // one genuinely hub-only piece of this design (the client
+            // has no equivalent -- one device, nothing to tune). A
+            // sub-subcommand, not a flag, since it changes shared
+            // config for every tenant, not just this invocation's own
+            // read -- the same weight `tenant`/`device`'s own
+            // sub-subcommands carry.
+            if first.as_deref() == Some("set-tier-config") {
+                let (Some(tier_idx), Some(step_secs), Some(slots)) =
+                    (args.next(), args.next(), args.next())
+                else {
+                    eprintln!(
+                        "wkp-hub: usage: wkp-hub usage set-tier-config <tier-idx> <step-secs> <slots>"
+                    );
+                    std::process::exit(1);
+                };
+                let parsed = tier_idx
+                    .parse::<i32>()
+                    .and_then(|t| step_secs.parse::<i64>().map(|s| (t, s)))
+                    .and_then(|(t, s)| slots.parse::<i64>().map(|sl| (t, s, sl)));
+                let Ok((tier_idx, step_secs, slots)) = parsed else {
+                    eprintln!(
+                        "wkp-hub: usage set-tier-config: tier-idx/step-secs/slots must all be integers"
+                    );
+                    std::process::exit(1);
+                };
+                let result = control_plane::connect().and_then(|mut client| {
+                    control_plane::usage::set_tier_config(&mut client, tier_idx, step_secs, slots)
+                });
+                match result {
+                    Ok(()) => println!(
+                        "wkp-hub: tier {tier_idx} set to step={step_secs}s, slots={slots} \
+                         (existing ring data for this tier reset across every tenant)"
+                    ),
+                    Err(e) => {
+                        eprintln!("wkp-hub: usage set-tier-config failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+
+            let mut tenant_slug = None;
+            let mut window = std::time::Duration::from_secs(24 * 3600);
+            let mut json = false;
+            let rest = first.into_iter().chain(args);
+            let mut rest = rest;
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--tenant" => tenant_slug = rest.next(),
+                    "--window" => match rest.next().as_deref() {
+                        Some("1h") => window = std::time::Duration::from_secs(3600),
+                        Some("1d") => window = std::time::Duration::from_secs(24 * 3600),
+                        Some("7d") => window = std::time::Duration::from_secs(7 * 24 * 3600),
+                        Some("30d") => window = std::time::Duration::from_secs(30 * 24 * 3600),
+                        other => {
+                            eprintln!(
+                                "wkp-hub: invalid --window value: {other:?} (expected 1h|1d|7d|30d)"
+                            );
+                            std::process::exit(1);
+                        }
+                    },
+                    "--json" => json = true,
+                    other => {
+                        eprintln!("wkp-hub: usage: unrecognized argument {other:?}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let Some(tenant_slug) = tenant_slug else {
+                eprintln!(
+                    "wkp-hub: usage: wkp-hub usage --tenant <slug> [--window 1h|1d|7d|30d] [--json] \
+                     | wkp-hub usage set-tier-config <tier-idx> <step-secs> <slots>"
+                );
+                std::process::exit(1);
+            };
+            match run_usage(&tenant_slug, window, json) {
+                Ok(output) => println!("{output}"),
+                Err(e) => {
+                    eprintln!("wkp-hub: usage failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
             eprintln!(
                 "wkp-hub: usage: wkp-hub serve [--port <port>] | \
@@ -637,9 +736,140 @@ fn main() {
                  index-tenant <tenant-slug> | \
                  index-worker --tenant <slug> [--poll-interval-ms <ms>] [--once] | \
                  provision-repo <tenant-slug> | start-pod <tenant-slug> | \
-                 stop-pod <tenant-slug> | reap-idle-pods [--idle-minutes <n>]"
+                 stop-pod <tenant-slug> | reap-idle-pods [--idle-minutes <n>] | \
+                 usage --tenant <slug> [--window 1h|1d|7d|30d] [--json] | \
+                 usage set-tier-config <tier-idx> <step-secs> <slots>"
             );
             std::process::exit(1);
         }
     }
+}
+
+/// Best-effort: records how long one `index-tenant` run took, keyed by
+/// the tenant's control-plane id (resolved from `tenant_slug`). Never
+/// fails the indexing command itself over a metrics-recording problem
+/// (an unreachable control plane, an unknown tenant slug) -- same
+/// "instrumentation, not a correctness-bearing subsystem" posture as the
+/// client side's `wkp-cli::record_invocation` (design 5.5's own
+/// consequences section, ADR-0016).
+///
+/// Deliberately does **not** cover `index-worker`'s own per-tenant
+/// indexing loop (issue #159): that process runs inside a container with
+/// `--network none` and a seccomp profile denying every socket syscall,
+/// so it has no path to the control plane's Postgres at all. Only the
+/// admin-triggered one-shot `index-tenant` command reports this metric
+/// today -- a real, documented gap versus design 8.4's "per-tenant
+/// indexer runs" framing, not a silent one. Closing it for the actual
+/// production indexing loop needs its own design (e.g. the serving
+/// container, which does have network access, periodically relaying
+/// what the indexing container can only write locally) -- tracked as
+/// follow-up, not attempted here.
+fn record_index_tenant_usage(
+    tenant_slug: &str,
+    elapsed: std::time::Duration,
+    indexed_items: usize,
+) {
+    let mut client = match control_plane::connect() {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("wkp-hub: usage: skipping (control plane unreachable): {e}");
+            return;
+        }
+    };
+    let tenant = match control_plane::find_tenant_by_slug(&mut client, tenant_slug) {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => {
+            eprintln!("wkp-hub: usage: skipping (no tenant row for slug {tenant_slug:?})");
+            return;
+        }
+        Err(e) => {
+            eprintln!("wkp-hub: usage: skipping (tenant lookup failed): {e}");
+            return;
+        }
+    };
+    let now = time::OffsetDateTime::now_utc();
+    if let Err(e) =
+        control_plane::usage::record_counter(&mut client, tenant.id, "index_tenant", elapsed, now)
+    {
+        eprintln!("wkp-hub: usage: recording index_tenant failed (non-fatal): {e}");
+    }
+    // A gauge, not a second counter -- the item count at the end of this
+    // run is the useful reading, the same way the client side's own
+    // `indexed_items` gauge (design 5.5) reports "how many items right
+    // now," not an average across a window.
+    if let Err(e) = control_plane::usage::record_gauge(
+        &mut client,
+        tenant.id,
+        "indexed_items",
+        indexed_items as f64,
+        now,
+    ) {
+        eprintln!("wkp-hub: usage: recording indexed_items failed (non-fatal): {e}");
+    }
+}
+
+/// Runs `wkp-hub usage --tenant <slug>`: every metric the catalog knows
+/// about, aggregated over `window`, for that one tenant.
+fn run_usage(tenant_slug: &str, window: std::time::Duration, json: bool) -> Result<String, String> {
+    let mut client = control_plane::connect().map_err(|e| e.to_string())?;
+    let tenant = control_plane::find_tenant_by_slug(&mut client, tenant_slug)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no tenant row for slug {tenant_slug:?}"))?;
+    let now = time::OffsetDateTime::now_utc();
+
+    let all = control_plane::usage::list_metrics(&mut client).map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for (name, kind) in &all {
+        let summary = control_plane::usage::query_window(&mut client, tenant.id, name, window, now)
+            .map_err(|e| e.to_string())?;
+        if summary.n == 0 {
+            continue;
+        }
+        rows.push((name.clone(), *kind, summary));
+    }
+
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(name, kind, s)| {
+                let kind_str = match kind {
+                    control_plane::usage::MetricKind::Counter => "counter",
+                    control_plane::usage::MetricKind::Gauge => "gauge",
+                };
+                serde_json::json!({
+                    "name": name,
+                    "kind": kind_str,
+                    "n": s.n,
+                    "sum": s.sum,
+                    "min": s.min,
+                    "max": s.max,
+                    "last": s.last,
+                })
+            })
+            .collect();
+        return Ok(serde_json::Value::Array(items).to_string());
+    }
+
+    if rows.is_empty() {
+        return Ok(format!(
+            "wkp-hub: no usage data for tenant {tenant_slug} in this window"
+        ));
+    }
+    Ok(rows
+        .iter()
+        .map(|(name, kind, s)| match kind {
+            control_plane::usage::MetricKind::Counter => format!(
+                "{name:<20} {:>6} calls  avg {:>7.2}ms  min {:>7.2}ms  max {:>7.2}ms",
+                s.n,
+                if s.n > 0 { s.sum / s.n as f64 } else { 0.0 },
+                s.min,
+                s.max
+            ),
+            control_plane::usage::MetricKind::Gauge => format!(
+                "{name:<20} {:>6} samples  last={:.2}  min={:.2}  max={:.2}",
+                s.n, s.last, s.min, s.max
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }

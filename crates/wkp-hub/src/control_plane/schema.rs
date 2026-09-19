@@ -114,6 +114,74 @@ CREATE TABLE IF NOT EXISTS connection_reset_events (
     performed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     performed_by TEXT NOT NULL
 );
+
+-- Design 8.4 (ADR-0016): the hub's own operational usage metrics --
+-- front-door request latency, per-tenant indexer runs, control-plane
+-- operation counts. Same fixed-slot ring-buffer shape as the client's
+-- `.wkp/usage` module (design 5.5), but one generic `usage_ring` table
+-- with a `tier_idx` column rather than one table per tier: unlike the
+-- client's compile-time-fixed tiers, `usage_metrics_config` below makes
+-- tier geometry a runtime value here, so the ring table's own shape
+-- can't be tier-specific.
+CREATE TABLE IF NOT EXISTS usage_metrics (
+    id   BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('counter', 'gauge'))
+);
+
+-- The "configurable retention resolution" design 8.4 calls out as the
+-- one piece that's genuinely hub-only (the client has no equivalent
+-- knob -- one device, one usage pattern, nothing to tune). Seeded with
+-- design 5.5's own client-side defaults so hub and client agree unless
+-- an operator deliberately overrides one. `set_tier_config` (usage.rs)
+-- is the only sanctioned way to change a row here -- it resets every
+-- existing `usage_ring`/`usage_cursors` row for that `tier_idx` in the
+-- same transaction, since a slot index computed under the old
+-- step/slots is meaningless under a new one.
+CREATE TABLE IF NOT EXISTS usage_metrics_config (
+    tier_idx  INT PRIMARY KEY,
+    step_secs BIGINT NOT NULL,
+    slots     BIGINT NOT NULL
+);
+
+INSERT INTO usage_metrics_config (tier_idx, step_secs, slots) VALUES
+    (0, 60, 360),
+    (1, 900, 1344),
+    (2, 21600, 1460)
+ON CONFLICT (tier_idx) DO NOTHING;
+
+-- One row per `(tenant, metric, tier, slot)` -- the ring itself.
+-- `n`/`sum`/`min`/`max`/`last` mean exactly what they mean in the
+-- client's own `SlotAgg` (design 5.5): `sum/n` is a counter's mean
+-- latency, `last` is a gauge's actually-useful value.
+CREATE TABLE IF NOT EXISTS usage_ring (
+    tenant_id    BIGINT NOT NULL REFERENCES tenants (id),
+    metric_id    BIGINT NOT NULL REFERENCES usage_metrics (id),
+    tier_idx     INT NOT NULL,
+    slot         BIGINT NOT NULL,
+    bucket_start BIGINT NOT NULL,
+    n            BIGINT NOT NULL,
+    sum          DOUBLE PRECISION NOT NULL,
+    min          DOUBLE PRECISION NOT NULL,
+    max          DOUBLE PRECISION NOT NULL,
+    last         DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (tenant_id, metric_id, tier_idx, slot)
+);
+
+-- Which bucket is currently open per `(tenant, metric, tier)`,
+-- independent of which physical slot holds it -- same reasoning as the
+-- client's own `cursors` table (design 5.5): consecutive time buckets at
+-- a fine step land in different slots, so fold-forward can't be driven
+-- by slot-reuse collision alone without leaving sparse tenant activity
+-- unflushed into the coarser tiers for a long time.
+CREATE TABLE IF NOT EXISTS usage_cursors (
+    tenant_id    BIGINT NOT NULL REFERENCES tenants (id),
+    metric_id    BIGINT NOT NULL REFERENCES usage_metrics (id),
+    tier_idx     INT NOT NULL,
+    slot         BIGINT NOT NULL,
+    bucket_start BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, metric_id, tier_idx)
+);
 "#;
 
 pub(super) fn create_schema(client: &mut Client) -> Result<(), postgres::Error> {
