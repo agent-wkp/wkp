@@ -19,4 +19,7 @@ mod schema;
 mod store;
 
 pub use schema::{MetricKind, UsageError};
-pub use store::{open_usage_db, query_window, record_counter, record_gauge, MetricSummary};
+pub use store::{
+    list_metrics, open_usage_db, open_usage_db_read_only, query_window, record_counter,
+    record_gauge, MetricSummary,
+};

@@ -59,6 +59,19 @@ impl MetricKind {
             MetricKind::Gauge => "gauge",
         }
     }
+
+    /// The inverse of `as_str`. Only ever called against a value read
+    /// back out of the `metrics` table's own `kind` column, which a
+    /// `CHECK (kind IN ('counter', 'gauge'))` constraint already
+    /// guarantees is one of these two strings -- `None` here would mean
+    /// that constraint itself failed, not a normal input-validation case.
+    pub(super) fn parse(s: &str) -> Option<MetricKind> {
+        match s {
+            "counter" => Some(MetricKind::Counter),
+            "gauge" => Some(MetricKind::Gauge),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]

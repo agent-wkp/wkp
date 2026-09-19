@@ -39,6 +39,16 @@ pub fn open_in_memory() -> rusqlite::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+/// Opens an existing database file strictly read-only -- fails if it
+/// doesn't already exist, unlike `open`'s create-if-absent behavior, and
+/// issues no writes of any kind against it, not even a pragma (`open`'s
+/// own `foreign_keys` pragma is itself a write). For a pure reader (e.g.
+/// `wkp usage`) that must never create or modify the file it's reading,
+/// even incidentally.
+pub fn open_read_only(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
