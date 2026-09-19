@@ -731,7 +731,7 @@ mod tests {
         let items = vec![
             item(
                 "ubi-images.md",
-                "UBI Images",
+                "Base Images",
                 "Uses UBI8 as the base image, also mentions UBI9-minimal",
             ),
             item("unrelated.md", "Unrelated", "nothing relevant here"),
