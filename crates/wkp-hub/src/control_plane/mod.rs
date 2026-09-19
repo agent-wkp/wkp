@@ -17,6 +17,7 @@
 
 pub mod grants;
 mod schema;
+pub mod usage;
 
 use postgres::{Client, NoTls, Row};
 use time::OffsetDateTime;
