@@ -172,6 +172,67 @@ fn every_subcommand_help_flag_prints_usage_and_exits_zero() {
     );
 }
 
+/// Generalizes the `init`/`import` bug class beyond the two subcommands
+/// that actually had it: an unrecognized flag, on ANY subcommand, must
+/// be rejected (nonzero exit) rather than silently treated as positional
+/// data that could create a bogus file or directory. This is the
+/// property that was missing specifically for `init`/`import` (no
+/// parser at all); every other subcommand already had it, but nothing
+/// asserted it would *stay* true if a future subcommand were added the
+/// same way `init`/`import` originally were -- without their own
+/// `starts_with('-')` guard.
+///
+/// `merge-driver` and `filter` are deliberately excluded: they're git-
+/// invoked plumbing (gitattributes(5)/merge-driver protocol), not a
+/// human-facing subcommand, and `filter` reads stdin to completion
+/// before erroring, which isn't safe to drive from a bare subprocess
+/// call here.
+#[test]
+fn every_subcommand_rejects_an_arbitrary_unrecognized_flag_without_side_effects() {
+    let bogus = "--this-flag-does-not-exist-xyz123";
+    let cases: &[&[&str]] = &[
+        &["init", bogus],
+        &["import", bogus],
+        &["search", bogus],
+        &["context", bogus],
+        &["traverse", bogus],
+        &["index", bogus],
+        &["materialize", bogus],
+        &["remember", bogus],
+        &["promote", bogus],
+        &["forget", bogus],
+        &["purge", bogus],
+        &["hooks", bogus],
+        &["resolve-conflicts", bogus],
+        &["sync", bogus],
+        &["sync", "status", bogus],
+        &["bundle", bogus],
+        &["bundle", "export", bogus],
+        &["bundle", "import", bogus],
+        &["hub", bogus],
+        &["hub", "register", bogus],
+        &["wkpd", bogus],
+        &["usage", bogus],
+    ];
+    for args in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = run_in(dir.path(), args);
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "wkp {args:?} must not succeed on an unrecognized flag"
+        );
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("dir entry").file_name())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "wkp {args:?} must not create any files/directories, found: {entries:?}"
+        );
+    }
+}
+
 #[test]
 fn unknown_subcommand_names_it_and_still_shows_usage() {
     let output = run(&["definitely-not-a-real-subcommand"]);
