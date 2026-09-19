@@ -63,8 +63,21 @@ pub struct SearchHit {
 /// frequency weighting, so this trades a little precision on short
 /// common words for not missing the obvious match on identifiers,
 /// versions, and filenames.
+///
+/// Embedded NUL bytes are stripped first -- found by a fuzz-style sanity
+/// check (`fuzz/fuzz_targets/search_query.rs`), not reported by hand: a
+/// query containing `\0` reached FTS5's query parser as a phrase that
+/// silently truncates at the NUL (`sqlite3`'s FTS5 query-string scanner
+/// uses C-string semantics there, not the explicit-length text SQLite
+/// binds), losing its closing quote and producing `fts5: syntax error:
+/// unterminated string`. Unreachable from the real `wkp search` CLI
+/// (process argv can't contain a NUL byte on any platform this ships
+/// for), but `search` is a public `wkp-core` API another caller could
+/// still hand an arbitrary string to -- stripping it here keeps the same
+/// "never fail on adversarial input" invariant this function exists for.
 fn sanitize_fts_query(raw: &str) -> String {
-    raw.split_whitespace()
+    raw.replace('\0', "")
+        .split_whitespace()
         .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
@@ -805,6 +818,26 @@ mod tests {
             search(&conn, "   ", &SearchFilter::default()).expect("whitespace-only query"),
             vec![]
         );
+    }
+
+    /// Regression test for a bug the new `search_query` fuzz target
+    /// caught, not a hand-written report: a query containing an embedded
+    /// NUL byte reached FTS5's own query-string scanner as a phrase that
+    /// truncates at the NUL (C-string semantics, not the explicit-length
+    /// text SQLite otherwise binds), losing its closing quote and
+    /// producing `fts5: syntax error: unterminated string`.
+    #[test]
+    fn search_strips_an_embedded_nul_byte_instead_of_erroring() {
+        let items = vec![item("a.md", "A", "helloworld content")];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        // The NUL is stripped, not treated as a separator, so
+        // "hello\0world" becomes the single word "helloworld" -- the
+        // point of this test is that `search` returns `Ok` at all,
+        // not what it matches.
+        let hits = search(&conn, "hello\0world", &SearchFilter::default())
+            .expect("an embedded NUL byte must not reach FTS5 as a truncated phrase");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "a.md");
     }
 
     #[test]

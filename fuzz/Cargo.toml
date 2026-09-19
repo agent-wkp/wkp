@@ -20,6 +20,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "search_query"
+path = "fuzz_targets/search_query.rs"
+test = false
+doc = false
+bench = false
+
 # Deliberately its own workspace: cargo-fuzz targets need a toolchain and
 # instrumentation the main workspace does not (commonly nightly), and
 # CLAUDE.md's supply-chain gates (deny/vet) apply to the release binary's
