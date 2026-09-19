@@ -113,6 +113,157 @@ See AGENTS.md for how an agent should use these, or docs/plan/milestones.md
 for what each one's own acceptance criteria are.\
 ";
 
+/// True when a subcommand's own remaining arguments (not including the
+/// subcommand name itself) ask for help -- checked in `dispatch` before
+/// that subcommand's own hand-rolled parser ever sees the args, so every
+/// subcommand supports `--help`/`-h` without each of the ~17 independent
+/// parsers (CLAUDE.md's slim-core: still no `clap`) needing to
+/// special-case it themselves. Found by hand: `wkp init --help` used to
+/// be silently interpreted as `wkp init` with path `./--help`, since
+/// `init`/`import` (unlike every other subcommand) had no argument
+/// parser at all -- see their own dispatch arms below for the fix.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+const HELP_INIT: &str = "\
+Usage: wkp init [PATH]
+
+Makes PATH (default: current directory) a git repository with a
+.wkp/ directory, wires SSH commit signing, registers the merge driver
+and clean/smudge filter, and runs `wkp import` once. Idempotent --
+safe to re-run.";
+
+const HELP_IMPORT: &str = "\
+Usage: wkp import [PATH]
+
+One-shot, idempotent migration of pre-existing memory into
+inbox/import/: CLAUDE.md/AGENTS.md at the store root, and every
+~/.claude/projects/*/memory/*.md file. Runs automatically as part of
+`wkp init`; call it again by hand if new source files show up later.
+An existing destination file is never overwritten.";
+
+const HELP_SEARCH: &str = "\
+Usage: wkp search <query> [--tier N] [--budget N] [-k/--limit N]
+                   [--format text|paths|json] [--path DIR]
+                   [--embed-url URL [--embed-model NAME] [--embed-key-file PATH]]
+
+BM25 full-text search over index.db. --budget stops once estimated
+token cost exceeds N. --format paths is the form to feed into a
+Read-tool call. --embed-url opts into hybrid BM25+embedding search
+(requires a binary built with the `embed` feature); never called by
+default.";
+
+const HELP_CONTEXT: &str = "\
+Usage: wkp context <query> [--tier N] [--budget N] [-k/--limit N]
+                    [--format text|paths|json] [--path DIR]
+
+Same flags as `search` (embedding flags are search-only -- context
+rejects them explicitly). Adds a graph traversal of the refs:/wikilink
+edges from each hit, so you also get directly-linked neighbors.";
+
+const HELP_TRAVERSE: &str = "\
+Usage: wkp traverse <path> [--depth N] [--format text|paths|json] [--path DIR]
+
+Walks refs:/[[wikilink]] edges outward from one specific file, no
+search query involved. --depth defaults to 2.";
+
+const HELP_MATERIALIZE: &str = "\
+Usage: wkp materialize --tier N [--path DIR]
+
+Writes .wkp/tierN.md atomically (temp file + rename). --tier is
+required -- no default, so a session-start hook never materializes
+\"whatever tier\" by accident.";
+
+const HELP_INDEX: &str = "\
+Usage: wkp index [PATH] [--embed-url URL] [--embed-model NAME] [--embed-key-file PATH]
+
+Rescans the store and updates index.db incrementally, using git's own
+change detection to hash only what changed. Only .md files are
+indexed. Safe to run any time; cheap after a single-file edit.";
+
+const HELP_USAGE: &str = "\
+Usage: wkp usage [--window 1h|1d|7d|30d] [--tool NAME] [--path DIR] [--json]
+
+Reads .wkp/metrics.db back: per-tool invocation count, error count,
+and avg/min/max latency for every subcommand run against this store.
+--window defaults to 1d; --tool filters to one metric by name.";
+
+const HELP_REMEMBER: &str = "\
+Usage: wkp remember --type <type> --principal <principal>
+                     --signing-key-file <path> [--scope <scope>]
+                     [--title <title>] [--session <session>] [--path <dir>]
+
+Writes one SSH-signed item to inbox/, body read from stdin (never
+argv). --type, --principal, and --signing-key-file are required.
+Always lands at confidence: proposed, tier 2 -- nothing self-promotes
+to tier 0/1.";
+
+const HELP_PROMOTE: &str = "\
+Usage: wkp promote <inbox-path> [--to <dest-path>] --principal <principal>
+                    --signing-key-file <path> [--path <dir>]
+
+Moves one inbox/ item into the durable tree with a human-signed
+commit. The one opt-in exception: a principal explicitly listed under
+[promote] auto = [...] in .wkp/config.toml.";
+
+const HELP_FORGET: &str = "\
+Usage: wkp forget <path> --principal <p> --signing-key-file <f> [--path <dir>]
+   or: wkp forget --device <id> --principal <p> --signing-key-file <f> [--path <dir>]
+
+The first form removes one tracked item; the second revokes a
+device's encryption-recipient entry and re-encrypts every currently-
+tracked visibility: private file. Both always require role: human.";
+
+const HELP_PURGE: &str = "\
+Usage: wkp purge <path> [--path <dir>]
+
+Erases a path from git history entirely, wrapping the upstream
+git-filter-repo tool (not vendored -- install it separately).";
+
+const HELP_SYNC: &str = "\
+Usage: wkp sync [--remote <name>] [--path <dir>]
+   or: wkp sync status [--path <dir>]
+
+Fetches and pushes this device's branch, converging with peer devices
+through the merge driver. `sync status` reports unresolved conflicts
+without changing anything.";
+
+const HELP_BUNDLE: &str = "\
+Usage: wkp bundle export <output-path> [--since <ref>] [--path <dir>]
+   or: wkp bundle import <bundle-path> [--path <dir>]
+
+`export` writes a git bundle for air-gapped sync (everything, or
+everything since --since). `import` applies a bundle produced by
+`bundle export` on another device.";
+
+const HELP_RESOLVE_CONFLICTS: &str = "\
+Usage: wkp resolve-conflicts [path]
+
+Resolves modify/delete conflicts (a deletion always loses to a
+modification) by keeping the modification and proposing the deletion
+as an inbox/ item instead of silently dropping either side.";
+
+const HELP_HUB: &str = "\
+Usage: wkp hub register --hub-url <url> --tenant <slug> --ca-cert <path> [--path <dir>]
+
+Registers this device with a wkp-hub (RFC 8628 device flow), issuing
+an mTLS device certificate. --ca-cert is the hub's own CA root.";
+
+const HELP_WKPD: &str = "\
+Usage: wkp wkpd --principal <p> --signing-key-file <path> [--path <dir>]
+                 [--remote <name>] [--socket-path <path>] [--debounce-ms <n>]
+
+Watch-triggered sync daemon: debounced auto-commit of local changes,
+incremental re-index, opportunistic sync. Binds a Unix domain socket
+only, peer-UID verified on every connection -- Linux only.";
+
+const HELP_HOOKS: &str = "\
+Usage: wkp hooks --framework <name>
+
+Prints text for a harness to apply -- never writes a file itself.
+Frameworks: claude_code, codex, opencode, hermes, agents_md.";
+
 /// The real body of `wkp`: every subcommand's argument parsing, dispatch,
 /// and error handling. Returns the process exit code instead of calling
 /// `std::process::exit` directly (every one of this function's ~70
@@ -180,10 +331,29 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            let path = args
-                .next()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().expect("wkp: cannot read cwd"));
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_INIT}");
+                return 0;
+            }
+            let mut args = args.into_iter();
+            // Unlike every other subcommand, `init` had no argument
+            // parser at all before this guard -- any unrecognized flag
+            // (including `--help`, handled above, but also a plain typo)
+            // silently became the literal path argument, creating a
+            // bogus nested store instead of erroring.
+            let path = match args.next() {
+                Some(p) if p.starts_with('-') => {
+                    eprintln!("wkp: unrecognized argument: {p}");
+                    return 1;
+                }
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir().expect("wkp: cannot read cwd"),
+            };
+            if let Some(extra) = args.next() {
+                eprintln!("wkp: unrecognized argument: {extra}");
+                return 1;
+            }
             match init::run_init(&path) {
                 Ok(()) => println!("wkp: initialized store at {}", path.display()),
                 Err(msg) => {
@@ -197,10 +367,26 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            let path = args
-                .next()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().expect("wkp: cannot read cwd"));
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_IMPORT}");
+                return 0;
+            }
+            let mut args = args.into_iter();
+            // Same missing-guard bug as `init` above: an unrecognized
+            // flag used to silently become the literal path argument.
+            let path = match args.next() {
+                Some(p) if p.starts_with('-') => {
+                    eprintln!("wkp: unrecognized argument: {p}");
+                    return 1;
+                }
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir().expect("wkp: cannot read cwd"),
+            };
+            if let Some(extra) = args.next() {
+                eprintln!("wkp: unrecognized argument: {extra}");
+                return 1;
+            }
             let claude_home = import::claude_home_from_env();
             match import::run_import(&path, claude_home.as_deref()) {
                 Ok(summary) => println!("{summary}"),
@@ -215,7 +401,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match search::parse_search_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_SEARCH}");
+                return 0;
+            }
+            match search::parse_search_args(args.into_iter()) {
                 Ok(opts) => match search::run_search(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
@@ -234,7 +425,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match search::parse_search_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_CONTEXT}");
+                return 0;
+            }
+            match search::parse_search_args(args.into_iter()) {
                 Ok(opts) => match context::run_context(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
@@ -253,7 +449,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match context::parse_traverse_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_TRAVERSE}");
+                return 0;
+            }
+            match context::parse_traverse_args(args.into_iter()) {
                 Ok(opts) => match context::run_traverse(&opts) {
                     Ok(output) => println!("{output}"),
                     Err(msg) => {
@@ -272,7 +473,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match index_cmd::parse_index_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_INDEX}");
+                return 0;
+            }
+            match index_cmd::parse_index_args(args.into_iter()) {
                 Ok(opts) => {
                     apply_write_sandbox(&opts.path);
                     match index_cmd::run_index_cli(&opts) {
@@ -294,7 +500,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match materialize::parse_materialize_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_MATERIALIZE}");
+                return 0;
+            }
+            match materialize::parse_materialize_args(args.into_iter()) {
                 Ok(opts) => match materialize::run_materialize(&opts) {
                     Ok(()) => {}
                     Err(msg) => {
@@ -313,7 +524,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match remember::parse_remember_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_REMEMBER}");
+                return 0;
+            }
+            match remember::parse_remember_args(args.into_iter()) {
                 Ok(opts) => {
                     apply_write_sandbox(&opts.path);
                     match remember::run_remember(&opts) {
@@ -335,7 +551,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match promote::parse_promote_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_PROMOTE}");
+                return 0;
+            }
+            match promote::parse_promote_args(args.into_iter()) {
                 Ok(opts) => {
                     apply_write_sandbox(&opts.path);
                     match promote::run_promote(&opts) {
@@ -352,34 +573,53 @@ fn dispatch() -> i32 {
                 }
             }
         }
-        Some("hub") => match args.next().as_deref() {
-            Some("register") => match hub_register::parse_hub_register_args(args) {
-                Ok(opts) => match hub_register::run_hub_register(&opts) {
-                    Ok(summary) => println!("{summary}"),
-                    Err(msg) => {
-                        eprintln!("wkp: hub register failed: {msg}");
-                        return 1;
+        Some("hub") => {
+            let sub = args.next();
+            if matches!(sub.as_deref(), Some("--help" | "-h")) {
+                println!("{HELP_HUB}");
+                return 0;
+            }
+            match sub.as_deref() {
+                Some("register") => {
+                    let args: Vec<String> = args.collect();
+                    if wants_help(&args) {
+                        println!("{HELP_HUB}");
+                        return 0;
                     }
-                },
-                Err(msg) => {
-                    eprintln!("wkp: {msg}");
+                    match hub_register::parse_hub_register_args(args.into_iter()) {
+                        Ok(opts) => match hub_register::run_hub_register(&opts) {
+                            Ok(summary) => println!("{summary}"),
+                            Err(msg) => {
+                                eprintln!("wkp: hub register failed: {msg}");
+                                return 1;
+                            }
+                        },
+                        Err(msg) => {
+                            eprintln!("wkp: {msg}");
+                            return 1;
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!(
+                        "wkp: usage: wkp hub register --hub-url <url> --tenant <slug> \
+                             --ca-cert <path> [--path <dir>]"
+                    );
                     return 1;
                 }
-            },
-            _ => {
-                eprintln!(
-                    "wkp: usage: wkp hub register --hub-url <url> --tenant <slug> \
-                         --ca-cert <path> [--path <dir>]"
-                );
-                return 1;
             }
-        },
+        }
         Some("forget") => {
             if let Err(msg) = wkp_git::ensure_min_git_version() {
                 eprintln!("{msg}");
                 return 1;
             }
-            match forget::parse_forget_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_FORGET}");
+                return 0;
+            }
+            match forget::parse_forget_args(args.into_iter()) {
                 Ok(opts) => {
                     apply_write_sandbox(&opts.path);
                     let result = match &opts.target {
@@ -411,7 +651,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match purge::parse_purge_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_PURGE}");
+                return 0;
+            }
+            match purge::parse_purge_args(args.into_iter()) {
                 Ok(opts) => match purge::run_purge(&opts) {
                     Ok(summary) => println!("{summary}"),
                     Err(msg) => {
@@ -429,19 +674,26 @@ fn dispatch() -> i32 {
         // never touches git or the store, only prints static text (design
         // 3.3: "the binary never writes outside its own store" -- this
         // command doesn't write anywhere at all).
-        Some("hooks") => match hooks::parse_hooks_args(args) {
-            Ok(framework) => match hooks::render_hooks(&framework) {
-                Ok(text) => println!("{text}"),
+        Some("hooks") => {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_HOOKS}");
+                return 0;
+            }
+            match hooks::parse_hooks_args(args.into_iter()) {
+                Ok(framework) => match hooks::render_hooks(&framework) {
+                    Ok(text) => println!("{text}"),
+                    Err(msg) => {
+                        eprintln!("wkp: {msg}");
+                        return 1;
+                    }
+                },
                 Err(msg) => {
                     eprintln!("wkp: {msg}");
                     return 1;
                 }
-            },
-            Err(msg) => {
-                eprintln!("wkp: {msg}");
-                return 1;
             }
-        },
+        }
         // Deliberately no `ensure_min_git_version` check: git itself
         // invokes this (per its own merge-driver protocol), not a human
         // typing `wkp`, and it only reads/writes the three plain temp
@@ -514,7 +766,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match resolve_conflicts::parse_resolve_conflicts_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_RESOLVE_CONFLICTS}");
+                return 0;
+            }
+            match resolve_conflicts::parse_resolve_conflicts_args(args.into_iter()) {
                 Ok(path) => match resolve_conflicts::resolve_modify_delete_conflicts(&path) {
                     Ok(inbox_paths) if inbox_paths.is_empty() => {
                         println!("wkp: no modify/delete conflicts found");
@@ -547,8 +804,17 @@ fn dispatch() -> i32 {
             // "status".
             let mut args = args;
             let first = args.next();
+            if matches!(first.as_deref(), Some("--help" | "-h")) {
+                println!("{HELP_SYNC}");
+                return 0;
+            }
             if first.as_deref() == Some("status") {
-                match sync_cmd::parse_sync_status_args(args) {
+                let args: Vec<String> = args.collect();
+                if wants_help(&args) {
+                    println!("{HELP_SYNC}");
+                    return 0;
+                }
+                match sync_cmd::parse_sync_status_args(args.into_iter()) {
                     Ok(path) => match sync_cmd::run_sync_status(&path) {
                         Ok(conflicts) => {
                             println!("{}", sync_cmd::SyncStatusSummary { conflicts })
@@ -564,8 +830,12 @@ fn dispatch() -> i32 {
                     }
                 }
             } else {
-                let rebuilt = first.into_iter().chain(args);
-                match sync_cmd::parse_sync_args(rebuilt) {
+                let rebuilt: Vec<String> = first.into_iter().chain(args).collect();
+                if wants_help(&rebuilt) {
+                    println!("{HELP_SYNC}");
+                    return 0;
+                }
+                match sync_cmd::parse_sync_args(rebuilt.into_iter()) {
                     Ok(opts) => match sync_cmd::run_sync(&opts) {
                         Ok(summary) => println!("{summary}"),
                         Err(msg) => {
@@ -585,33 +855,52 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match args.next().as_deref() {
-                Some("export") => match bundle::parse_bundle_export_args(args) {
-                    Ok(opts) => match bundle::run_bundle_export(&opts) {
-                        Ok(summary) => println!("{summary}"),
+            let sub = args.next();
+            if matches!(sub.as_deref(), Some("--help" | "-h")) {
+                println!("{HELP_BUNDLE}");
+                return 0;
+            }
+            match sub.as_deref() {
+                Some("export") => {
+                    let args: Vec<String> = args.collect();
+                    if wants_help(&args) {
+                        println!("{HELP_BUNDLE}");
+                        return 0;
+                    }
+                    match bundle::parse_bundle_export_args(args.into_iter()) {
+                        Ok(opts) => match bundle::run_bundle_export(&opts) {
+                            Ok(summary) => println!("{summary}"),
+                            Err(msg) => {
+                                eprintln!("wkp: bundle export failed: {msg}");
+                                return 1;
+                            }
+                        },
                         Err(msg) => {
-                            eprintln!("wkp: bundle export failed: {msg}");
+                            eprintln!("wkp: {msg}");
                             return 1;
                         }
-                    },
-                    Err(msg) => {
-                        eprintln!("wkp: {msg}");
-                        return 1;
                     }
-                },
-                Some("import") => match bundle::parse_bundle_import_args(args) {
-                    Ok(opts) => match bundle::run_bundle_import(&opts) {
-                        Ok(summary) => println!("{summary}"),
+                }
+                Some("import") => {
+                    let args: Vec<String> = args.collect();
+                    if wants_help(&args) {
+                        println!("{HELP_BUNDLE}");
+                        return 0;
+                    }
+                    match bundle::parse_bundle_import_args(args.into_iter()) {
+                        Ok(opts) => match bundle::run_bundle_import(&opts) {
+                            Ok(summary) => println!("{summary}"),
+                            Err(msg) => {
+                                eprintln!("wkp: bundle import failed: {msg}");
+                                return 1;
+                            }
+                        },
                         Err(msg) => {
-                            eprintln!("wkp: bundle import failed: {msg}");
+                            eprintln!("wkp: {msg}");
                             return 1;
                         }
-                    },
-                    Err(msg) => {
-                        eprintln!("wkp: {msg}");
-                        return 1;
                     }
-                },
+                }
                 other => {
                     eprintln!(
                         "wkp: bundle requires a subcommand: export or import (got {other:?})"
@@ -625,7 +914,12 @@ fn dispatch() -> i32 {
                 eprintln!("{msg}");
                 return 1;
             }
-            match wkpd::parse_wkpd_args(args) {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_WKPD}");
+                return 0;
+            }
+            match wkpd::parse_wkpd_args(args.into_iter()) {
                 Ok(opts) => {
                     if let Err(msg) = wkpd::run_wkpd(&opts) {
                         eprintln!("wkp: wkpd failed: {msg}");
@@ -641,19 +935,26 @@ fn dispatch() -> i32 {
         // Deliberately no `ensure_min_git_version` check, same reasoning
         // as `hooks` above: `wkp usage` only ever reads `.wkp/metrics.db`
         // directly via `wkp_core::usage`, never `wkp-git` plumbing.
-        Some("usage") => match usage_cmd::parse_usage_args(args) {
-            Ok(opts) => match usage_cmd::run_usage(&opts) {
-                Ok(output) => println!("{output}"),
+        Some("usage") => {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_USAGE}");
+                return 0;
+            }
+            match usage_cmd::parse_usage_args(args.into_iter()) {
+                Ok(opts) => match usage_cmd::run_usage(&opts) {
+                    Ok(output) => println!("{output}"),
+                    Err(msg) => {
+                        eprintln!("wkp: usage failed: {msg}");
+                        return 1;
+                    }
+                },
                 Err(msg) => {
-                    eprintln!("wkp: usage failed: {msg}");
+                    eprintln!("wkp: {msg}");
                     return 1;
                 }
-            },
-            Err(msg) => {
-                eprintln!("wkp: {msg}");
-                return 1;
             }
-        },
+        }
         // Undocumented on purpose (M6-1, issue #170): not real user
         // subcommands, just a way for `tests/sandbox_integration.rs`
         // to exercise `sandbox.rs`'s two functions as real subprocesses

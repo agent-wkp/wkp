@@ -6,7 +6,10 @@ read/write paths and when to call what, see [`AGENTS.md`](../AGENTS.md)
 flat reference: one entry per subcommand, what it does, exact syntax.
 
 `wkp --help` prints the short form of this list from the CLI itself;
-`wkp --version`/`-V` prints the version.
+`wkp --version`/`-V` prints the version. Every subcommand also accepts
+its own `--help`/`-h` (`wkp search --help`, `wkp hub register --help`,
+`wkp bundle export --help`, ...), printing that subcommand's usage text
+and exiting 0 rather than being parsed as a positional argument.
 
 Flags shown in `[brackets]` are optional. `--path <dir>` defaults to the
 current directory everywhere it appears, unless noted otherwise.

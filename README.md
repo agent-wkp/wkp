@@ -39,10 +39,12 @@ wkp materialize --tier 0          # writes .wkp/tier0.md
 That covers reading. Agents also write memory (`wkp remember`) for a
 human to promote (`wkp promote`) — see
 [`docs/cli-reference.md`](docs/cli-reference.md) for every subcommand,
-or [`AGENTS.md`](AGENTS.md) for the full write-path walkthrough.
-`wkp search`/`wkp context` treat the query as plain text (punctuation
-like `RHOAI 3.6` or `file-name.ext` searches literally) and match each
-term as a prefix, so `wkp search "ubi"` finds `UBI8`/`UBI9-minimal` too.
+or [`AGENTS.md`](AGENTS.md) for the full write-path walkthrough. Every
+subcommand accepts `--help`/`-h` for its own usage text, e.g. `wkp
+search --help`. `wkp search`/`wkp context` treat the query as plain
+text (punctuation like `RHOAI 3.6` or `file-name.ext` searches
+literally) and match each term as a prefix, so `wkp search "ubi"` finds
+`UBI8`/`UBI9-minimal` too.
 
 ## Usage modes
 
