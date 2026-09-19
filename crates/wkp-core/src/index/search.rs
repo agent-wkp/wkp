@@ -69,12 +69,22 @@ pub fn search(
     query: &str,
     filter: &SearchFilter,
 ) -> Result<Vec<SearchHit>, IndexError> {
+    let sanitized = sanitize_fts_query(query);
+    // An empty or whitespace-only query has no terms to match against --
+    // binding `""` to `MATCH` is itself invalid FTS5 syntax (`fts5: syntax
+    // error near ""`), so short-circuit to "no results" rather than
+    // letting that reach SQLite as a second flavor of the same bug this
+    // function exists to fix.
+    if sanitized.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let (w_path, w_title, w_content, w_tags) = BM25_WEIGHTS;
     let mut sql = format!(
         "SELECT path, title, -bm25(items, {w_path}, {w_title}, {w_content}, {w_tags}) AS score, \
          tier, tokens_estimate FROM items WHERE items MATCH ?"
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(sanitize_fts_query(query))];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(sanitized)];
 
     if let Some(v) = &filter.item_type {
         sql.push_str(" AND item_type = ?");
@@ -717,6 +727,49 @@ mod tests {
         let hits = search(&conn, "colon: value", &SearchFilter::default())
             .expect("query containing a colon");
         assert_eq!(hits.len(), 1);
+    }
+
+    /// A query that is itself an FTS5 boolean bareword must be matched as
+    /// literal text, not parsed as the `AND` operator (which alone, with
+    /// no operands, is also invalid FTS5 syntax on its own).
+    #[test]
+    fn search_treats_a_bareword_boolean_operator_query_as_literal_text() {
+        let items = vec![
+            item(
+                "has-and.md",
+                "Has And",
+                "the word AND appears in this document",
+            ),
+            item(
+                "unrelated.md",
+                "Unrelated",
+                "this document does not contain that term",
+            ),
+        ];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+
+        let hits = search(&conn, "AND", &SearchFilter::default())
+            .expect("a bareword boolean operator query must not error");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "has-and.md");
+    }
+
+    /// An empty or whitespace-only query has no terms to match -- it must
+    /// return no results rather than reaching SQLite as `MATCH ""`, which
+    /// is itself an FTS5 syntax error.
+    #[test]
+    fn search_with_an_empty_or_whitespace_only_query_returns_no_results() {
+        let items = vec![item("a.md", "A", "some content")];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+
+        assert_eq!(
+            search(&conn, "", &SearchFilter::default()).expect("empty query"),
+            vec![]
+        );
+        assert_eq!(
+            search(&conn, "   ", &SearchFilter::default()).expect("whitespace-only query"),
+            vec![]
+        );
     }
 
     #[test]
