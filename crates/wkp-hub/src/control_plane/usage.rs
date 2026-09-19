@@ -56,12 +56,27 @@ struct TierConfig {
     slots: i64,
 }
 
+/// A fixed advisory-lock key naming "tier geometry is stable right now"
+/// -- readers/writers of ring data (`record`, `query_window`) take this
+/// *shared* for the duration of their own transaction/query, and
+/// `set_tier_config` takes it *exclusive* around its own read-modify-reset
+/// sequence. Postgres blocks an exclusive request against any held shared
+/// lock and vice versa, so a `record()` transaction can never observe
+/// geometry that changes out from under it mid-transaction, and
+/// `set_tier_config` can never reset a tier while a write using the old
+/// geometry is still in flight. Same precedent as `schema.rs`'s own
+/// `SCHEMA_LOCK_KEY` for its analogous concurrent-creation race, just
+/// with the shared/exclusive pair since this one has real readers.
+const TIER_CONFIG_LOCK_KEY: i64 = 0x776b705f75736167; // "wkp_usag" as bytes
+
 /// Reads the current tier geometry from `usage_metrics_config`, ordered
 /// by `tier_idx`. Generic over `GenericClient` so both a plain `Client`
 /// (the read path, `query_window`/`list_metrics`) and a `Transaction`
 /// (the write path, `apply`, which must see the same geometry the rest
 /// of its own transaction commits against) can call it without two
-/// near-identical copies.
+/// near-identical copies. Callers are responsible for holding
+/// `TIER_CONFIG_LOCK_KEY` (shared) for as long as the returned geometry
+/// stays in play -- this function itself only reads the table.
 fn load_tier_config<C: GenericClient>(client: &mut C) -> Result<Vec<TierConfig>, Error> {
     // `WHERE tier_idx IN (0, 1, 2)`, not an unfiltered `SELECT *`: the
     // three canonical tiers are the only ones `apply`/`query_window`
@@ -104,7 +119,19 @@ pub fn set_tier_config(
             "tier_idx must be 0, 1, or 2 (the three canonical tiers load_tier_config recognizes), got {tier_idx}"
         )));
     }
+    if step_secs < 1 || slots < 1 {
+        return Err(Error::InvalidInput(format!(
+            "step_secs and slots must both be >= 1 (a zero or negative step/slot count makes \
+             floor_to_step/slot_for divide by zero on every later record() call for this tier), \
+             got step_secs={step_secs}, slots={slots}"
+        )));
+    }
     let mut tx = client.transaction()?;
+    // Exclusive: blocks until every in-flight record()/query_window
+    // holding the shared lock has finished, and blocks any new one from
+    // starting until this transaction commits or rolls back -- see
+    // TIER_CONFIG_LOCK_KEY's own doc comment.
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&TIER_CONFIG_LOCK_KEY])?;
     tx.execute(
         "INSERT INTO usage_metrics_config (tier_idx, step_secs, slots) VALUES ($1, $2, $3)
          ON CONFLICT (tier_idx) DO UPDATE SET step_secs = excluded.step_secs, slots = excluded.slots",
@@ -124,25 +151,32 @@ fn get_or_create_metric<C: GenericClient>(
     name: &str,
     kind: MetricKind,
 ) -> Result<i64, Error> {
-    if let Some(row) = client.query_opt(
-        "SELECT id, kind FROM usage_metrics WHERE name = $1",
-        &[&name],
-    )? {
-        let id: i64 = row.get(0);
-        let stored_kind: String = row.get(1);
-        if stored_kind != kind.as_str() {
-            return Err(Error::InvalidInput(format!(
-                "metric '{name}' is already registered as '{stored_kind}', cannot record it as '{}'",
-                kind.as_str()
-            )));
-        }
-        return Ok(id);
-    }
+    // One atomic upsert, not a SELECT followed by a separate INSERT: two
+    // concurrent callers racing to register the same brand-new metric
+    // name would otherwise both pass the "does it exist" check before
+    // either commits, and the loser would hit `usage_metrics_name_key`'s
+    // unique-constraint violation instead of a harmless no-op -- the
+    // exact race `schema.rs`'s own module doc describes finding for
+    // concurrent `CREATE TABLE IF NOT EXISTS` calls. `DO UPDATE SET name
+    // = excluded.name` is a no-op write (never changes `kind`) that
+    // exists purely so `ON CONFLICT` still has a row to `RETURNING` --
+    // the standard idiom for "insert, or fetch the existing row" in one
+    // round trip.
     let row = client.query_one(
-        "INSERT INTO usage_metrics (name, kind) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO usage_metrics (name, kind) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET name = excluded.name
+         RETURNING id, kind",
         &[&name, &kind.as_str()],
     )?;
-    Ok(row.get(0))
+    let id: i64 = row.get(0);
+    let stored_kind: String = row.get(1);
+    if stored_kind != kind.as_str() {
+        return Err(Error::InvalidInput(format!(
+            "metric '{name}' is already registered as '{stored_kind}', cannot record it as '{}'",
+            kind.as_str()
+        )));
+    }
+    Ok(id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -396,13 +430,38 @@ fn record(
     at: OffsetDateTime,
 ) -> Result<(), Error> {
     let mut tx = client.transaction()?;
+    let metric_id = get_or_create_metric(&mut tx, name, kind)?;
+
+    // Shared: see TIER_CONFIG_LOCK_KEY's own doc comment -- blocks a
+    // concurrent set_tier_config from resetting a tier's geometry while
+    // this transaction is still relying on it.
+    tx.execute(
+        "SELECT pg_advisory_xact_lock_shared($1)",
+        &[&TIER_CONFIG_LOCK_KEY],
+    )?;
+
+    // Exclusive, scoped to this one (tenant, metric) pair: serializes
+    // concurrent record() calls for the same metric so two callers can
+    // never both observe "no cursor yet" and independently write a
+    // single-sample row, silently discarding one of the two samples --
+    // write_slot's own `ON CONFLICT DO UPDATE` replaces a slot's
+    // aggregate wholesale, there is no server-side "add to whatever's
+    // already there" fallback. Held for the whole transaction, so the
+    // recursive `apply` cascade across tiers is covered by this one
+    // acquisition, not a separate one per tier. The multiplicative
+    // combine is a cheap, deterministic hash, not a guaranteed-unique
+    // key -- a rare collision only costs two unrelated metrics some
+    // extra serialization, never a correctness problem, since the real
+    // row-level uniqueness still comes from the primary keys themselves.
+    let metric_lock_key = tenant_id.wrapping_mul(1_000_003).wrapping_add(metric_id);
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&metric_lock_key])?;
+
     let tiers = load_tier_config(&mut tx)?;
     if tiers.is_empty() {
         return Err(Error::InvalidInput(
             "usage_metrics_config has no tiers -- schema not initialized correctly".to_string(),
         ));
     }
-    let metric_id = get_or_create_metric(&mut tx, name, kind)?;
     let bucket_start = floor_to_step(at.unix_timestamp(), tiers[0].step_secs);
     apply(
         &mut tx,
@@ -521,6 +580,17 @@ impl WindowAcc {
 /// of whether its row still exists, and a wide window also pulls in any
 /// finer tier's still-open cursor bucket, since that data hasn't folded
 /// up into the coarser tier yet.
+///
+/// Unlike `record`, this does not hold `TIER_CONFIG_LOCK_KEY` across its
+/// several separate queries -- a `set_tier_config` reset committing
+/// midway through can at worst make this read pick a tier boundary that
+/// no longer matches a just-reset tier's (now-empty) rows, undercounting
+/// for one query during the rare window an operator is actively
+/// reconfiguring retention. Self-correcting on the next call, never
+/// corrupts anything (only `record`'s writes can do that, which is what
+/// the shared lock there actually guards against) -- accepted for a
+/// best-effort read path rather than adding transaction-wrapping
+/// complexity here too.
 pub fn query_window(
     client: &mut Client,
     tenant_id: i64,
@@ -956,6 +1026,20 @@ mod tests {
         let err = set_tier_config(&mut client, 3, 60, 100).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
         let err = set_tier_config(&mut client, -1, 60, 100).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    }
+
+    #[test]
+    fn set_tier_config_rejects_a_zero_or_negative_step_or_slot_count() {
+        // Same reasoning as the out-of-range-tier_idx test above for why
+        // this only exercises the validation path (rejected before any
+        // DB write) and never a real, in-range reconfiguration.
+        let mut client = connect();
+        let err = set_tier_config(&mut client, 0, 0, 100).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+        let err = set_tier_config(&mut client, 0, 60, 0).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+        let err = set_tier_config(&mut client, 0, -5, 100).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     }
 }

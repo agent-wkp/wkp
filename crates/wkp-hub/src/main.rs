@@ -658,6 +658,12 @@ fn main() {
                     );
                     std::process::exit(1);
                 };
+                if let Some(extra) = args.next() {
+                    eprintln!(
+                        "wkp-hub: usage set-tier-config: unrecognized extra argument {extra:?}"
+                    );
+                    std::process::exit(1);
+                }
                 let parsed = tier_idx
                     .parse::<i32>()
                     .and_then(|t| step_secs.parse::<i64>().map(|s| (t, s)))
