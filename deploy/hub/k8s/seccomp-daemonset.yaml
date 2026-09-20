@@ -21,6 +21,27 @@
 # itself runs in (the DaemonSet's own namespace doesn't matter for
 # reaching node-local `hostPath` -- picking the same namespace as the
 # rest of the deployment is just convention, not a requirement).
+#
+# **Verified against a real OpenShift cluster, not assumed** (see
+# git blame on this comment for the date): writing to a `hostPath`
+# volume at all is genuinely, unavoidably rejected under every
+# restricted/default SCC OpenShift ships --
+# `hostPath volumes are not allowed to be used` is the platform's own
+# admission error, listing every SCC already usable by a plain
+# ServiceAccount as forbidden for this reason. This is real and
+# structural (there is no non-privileged way to write to node-local
+# storage), unlike the `anyuid` grant this same effort initially assumed
+# `wkp-hub`'s own front-door Deployment needed and then found, by
+# testing, that it didn't (`ops/secrets.md` in `paperless-ink/infra`).
+# The fix here is `hostmount-anyuid` (allows `hostPath` + arbitrary UID,
+# short of `privileged` or `hostaccess`'s broader host-namespace access)
+# granted to a **dedicated ServiceAccount used by nothing else** --
+# never the namespace's `default` ServiceAccount, which would extend the
+# grant to every other workload that happens to run under it:
+#
+#   kubectl create serviceaccount wkp-hub-seccomp-installer -n <namespace>
+#   oc adm policy add-scc-to-user hostmount-anyuid \
+#     -z wkp-hub-seccomp-installer -n <namespace>
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -34,6 +55,7 @@ spec:
       labels:
         app: wkp-hub-seccomp-installer
     spec:
+      serviceAccountName: wkp-hub-seccomp-installer
       initContainers:
         - name: install-profile
           image: registry.access.redhat.com/ubi9/ubi-minimal:latest
