@@ -70,6 +70,51 @@ Schema applies automatically on first connect — `wkp-hub migrate` just
 confirms it (`wkp-hub: schema is up to date`), there's no separate
 migration-file step to run by hand.
 
+## Deploying on Kubernetes/OpenShift instead of a single podman host
+
+`WKP_HUB_POD_ORCHESTRATOR=kubernetes` (issue #141,
+[`docs/adr/0012-pod-orchestrator-abstraction.md`](adr/0012-pod-orchestrator-abstraction.md)'s
+2026-09-20 addendum) runs the front door as an ordinary Kubernetes/
+OpenShift workload instead of a single podman host, with tenant
+isolation via real Pods, Services, and PersistentVolumeClaims instead of
+podman pods. This backend only supports **in-cluster** authentication —
+`wkp-hub` must itself run as a Pod in the cluster it manages, using that
+Pod's own projected ServiceAccount token; there is no support for
+pointing it at a remote cluster via a `~/.kube/config`-style kubeconfig
+from outside.
+
+Three things beyond `serve`'s usual environment variables:
+
+1. **RBAC**: a namespaced `ServiceAccount` bound to a `Role` granting
+   `get`/`list`/`watch`/`create`/`delete` on `pods`, `services`, and
+   `persistentvolumeclaims` in the one namespace `wkp-hub` runs in —
+   never cluster-admin, never a `ClusterRole`.
+2. **The seccomp profile, staged cluster-wide, once**:
+   [`deploy/hub/k8s/seccomp-daemonset.yaml`](../deploy/hub/k8s/seccomp-daemonset.yaml)
+   copies `deploy/hub/seccomp-no-network.json` onto every node's kubelet
+   seccomp root — required because a tenant's `index-worker` container
+   gets its "no network" property from
+   `securityContext.seccompProfile.localhostProfile` on this backend
+   (there is no Kubernetes equivalent of podman's `--network none`), and
+   the kubelet refuses to start a Pod naming a profile that isn't
+   already on-node.
+3. **The image itself needs `kubectl`** (and `psql`, for the manual
+   lifecycle test below) — both already bundled by
+   [`deploy/hub/Containerfile`](../deploy/hub/Containerfile).
+
+No client library is involved — `KubernetesOrchestrator` shells out to
+`kubectl` exactly the way the podman backend shells out to `podman`; see
+the ADR addendum linked above for the full reasoning behind every choice
+(why a bare `Pod` and not a `Deployment`, why a PVC per tenant, why
+`tokenFile` rather than a literal token).
+
+**Verifying a real deployment**:
+[`deploy/hub/test-kubernetes-pod-lifecycle.sh`](../deploy/hub/test-kubernetes-pod-lifecycle.sh)
+is the Kubernetes analogue of `test-pod-lifecycle.sh` — not wired into
+CI (no Kubernetes cluster available there), run by hand against a real
+cluster, e.g. `oc exec` into the running front-door Deployment once RBAC
+and the seccomp DaemonSet are both applied.
+
 ## Create a tenant
 
 ```bash

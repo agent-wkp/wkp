@@ -47,8 +47,9 @@
 //!   Podman-specific -- there is no Kubernetes equivalent (the
 //!   Kubernetes Pod API has no per-container opt-out of the Pod's
 //!   shared network namespace at all), so this is defense-in-depth on
-//!   today's backend, not something a future `KubernetesOrchestrator`
-//!   (issue #141) can rely on.
+//!   the podman backend specifically; [`crate::k8s_orchestrator`]
+//!   (issue #141) relies on the seccomp profile below alone for this
+//!   property.
 //! - [`SECCOMP_NO_NETWORK_PROFILE`]: a seccomp filter denying every
 //!   syscall that creates or uses a socket. This one *does* have a
 //!   direct Kubernetes equivalent (`securityContext.seccompProfile`,
@@ -115,22 +116,21 @@ pub trait PodOrchestrator: Send + Sync {
 /// production call site resolves this once and holds onto the result,
 /// rather than re-reading the environment variable per call.
 ///
-/// `"kubernetes"` is a reserved name, not a working backend -- there is
-/// no Kubernetes client code in this repo yet (ADR-0012 deliberately
-/// left that implementation for later). Selecting it fails fast at
-/// startup with a clear message; it does not silently fall back to
-/// podman, and there is no stub implementation pretending to work.
+/// `"kubernetes"` (issue #141, ADR-0012's 2026-09-20 addendum) selects
+/// [`crate::k8s_orchestrator::KubernetesOrchestrator`] -- see that
+/// module's own doc comment for the implementation. Constructing it can
+/// itself fail (e.g. this process isn't actually running in a
+/// Kubernetes Pod), which surfaces as this function's own `Err`, the
+/// same "fail fast at startup, not on some tenant's first request"
+/// posture the previous reserved-name error already had.
 pub fn orchestrator() -> Result<Box<dyn PodOrchestrator>, String> {
     match std::env::var("WKP_HUB_POD_ORCHESTRATOR") {
         Err(std::env::VarError::NotPresent) => Ok(Box::new(PodmanOrchestrator)),
         Ok(v) if v == "podman" => Ok(Box::new(PodmanOrchestrator)),
-        Ok(v) if v == "kubernetes" => Err(
-            "WKP_HUB_POD_ORCHESTRATOR=kubernetes is reserved (ADR-0012) but has no \
-             implementation yet"
-                .to_string(),
-        ),
+        Ok(v) if v == "kubernetes" => crate::k8s_orchestrator::KubernetesOrchestrator::new()
+            .map(|o| Box::new(o) as Box<dyn PodOrchestrator>),
         Ok(other) => Err(format!(
-            "unknown WKP_HUB_POD_ORCHESTRATOR {other:?} (expected \"podman\")"
+            "unknown WKP_HUB_POD_ORCHESTRATOR {other:?} (expected \"podman\" or \"kubernetes\")"
         )),
         Err(e) => Err(format!("WKP_HUB_POD_ORCHESTRATOR: {e}")),
     }
@@ -331,7 +331,8 @@ fn start_pod(image: &str, repos_root: &Path, tenant_slug: &str) -> Result<(), St
     // alias, and -- see the module doc comment (issue #159) -- no way
     // to touch the network at all, applied two independent ways since
     // only one of them (the seccomp profile) has a Kubernetes
-    // equivalent for a future `KubernetesOrchestrator` to carry over.
+    // equivalent -- `crate::k8s_orchestrator` (issue #141) carries that
+    // one over, not `--network none`.
     let seccomp_path = ensure_seccomp_profile(repos_root)?;
     run_podman(&[
         "run",
@@ -472,16 +473,25 @@ mod tests {
         std::env::set_var("WKP_HUB_POD_ORCHESTRATOR", "podman");
         assert!(orchestrator().is_ok(), "explicit podman must be accepted");
 
+        // "kubernetes" now selects a real backend (issue #141) instead
+        // of failing with the old reserved-name error -- but this test
+        // process isn't running in a Kubernetes Pod, so
+        // `KubernetesOrchestrator::new()` must still fail, just with a
+        // *different*, environment-specific message instead of the old
+        // hardcoded "reserved" one. `Box<dyn PodOrchestrator>` isn't
+        // `Debug`, so `unwrap_err` doesn't work here -- match instead.
         std::env::set_var("WKP_HUB_POD_ORCHESTRATOR", "kubernetes");
-        // `Box<dyn PodOrchestrator>` isn't `Debug`, so `unwrap_err`
-        // (which needs the `Ok` side to be `Debug` for its own panic
-        // message) doesn't work here -- match instead.
         match orchestrator() {
             Err(err) => assert!(
-                err.contains("kubernetes") && err.contains("ADR-0012"),
-                "kubernetes must fail fast with a clear reserved-name message, got: {err}"
+                err.contains("Kubernetes Pod"),
+                "outside a real cluster this must fail clearly, not silently \
+                 return a broken orchestrator, got: {err}"
             ),
-            Ok(_) => panic!("kubernetes must not silently select a working orchestrator"),
+            Ok(_) => panic!(
+                "this test process is not running in a Kubernetes Pod -- if this \
+                 assertion fires, something changed about how orchestrator() \
+                 detects that, not about whether it's actually safe here"
+            ),
         }
 
         std::env::set_var("WKP_HUB_POD_ORCHESTRATOR", "nonsense");

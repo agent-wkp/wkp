@@ -60,6 +60,30 @@ RUN microdnf install -y --setopt=install_weak_deps=0 \
     && ln -s /usr/bin/podman-remote /usr/bin/podman \
     && mkdir -p /srv/wkp-hub/repos
 
+# `kubectl` (issue #141, ADR-0012's 2026-09-20 addendum):
+# `KubernetesOrchestrator` shells out to it exactly like the
+# `podman`/`podman-remote` symlink above does for the podman backend --
+# only actually invoked when `WKP_HUB_POD_ORCHESTRATOR=kubernetes` is
+# set, harmless (and unused) otherwise. Downloaded directly from
+# Kubernetes' own release site rather than a distro package: Fedora's
+# `kubernetes*-client` package names and versions drift independently
+# of this project's own release cadence, and the official binary is a
+# single static file with no dependency surface to track, the same
+# reasoning `rustup`'s own curl-install above already applies.
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod 755 /usr/local/bin/kubectl
+
+# `psql` (postgresql client only, not the server): needed only by
+# `deploy/hub/test-kubernetes-pod-lifecycle.sh`'s reaper check (backdates
+# a tenant's `last_active_at` directly), mirroring
+# `test-pod-lifecycle.sh`'s own `psql` dependency for the podman backend.
+# Not on any production code path -- `wkp-hub` itself talks to Postgres
+# through the `postgres` Rust crate already linked into the binary, not
+# a subprocess.
+RUN microdnf install -y --setopt=install_weak_deps=0 postgresql \
+    && microdnf clean all
+
 # `git-receive-pack`/`git http-backend` (this container's own front
 # door, and every tenant pod's `serve-tenant` mode) refuses a repo it
 # doesn't consider itself the owner of ("detected dubious ownership")
