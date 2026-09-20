@@ -83,7 +83,9 @@ Pod's own projected ServiceAccount token; there is no support for
 pointing it at a remote cluster via a `~/.kube/config`-style kubeconfig
 from outside.
 
-Three things beyond `serve`'s usual environment variables:
+Four things beyond `serve`'s usual environment variables — the last two
+are **SCC grants confirmed necessary against a real OpenShift cluster**,
+not assumed, so don't skip them expecting the defaults to be enough:
 
 1. **RBAC**: a namespaced `ServiceAccount` bound to a `Role` granting
    `get`/`list`/`watch`/`create`/`delete` on `pods`, `services`, and
@@ -97,8 +99,25 @@ Three things beyond `serve`'s usual environment variables:
    `securityContext.seccompProfile.localhostProfile` on this backend
    (there is no Kubernetes equivalent of podman's `--network none`), and
    the kubelet refuses to start a Pod naming a profile that isn't
-   already on-node.
-3. **The image itself needs `kubectl`** (and `psql`, for the manual
+   already on-node. That DaemonSet's `hostPath` volume itself needs the
+   `hostmount-anyuid` SCC granted to a **dedicated** ServiceAccount
+   (never the namespace's `default`) — see that manifest's own comment
+   for the exact command; OpenShift's own admission error is explicit
+   that no default SCC permits `hostPath` at all.
+3. **The front door's own ServiceAccount needs
+   [`deploy/hub/k8s/tenant-pod-scc.yaml`](../deploy/hub/k8s/tenant-pod-scc.yaml)**
+   bound to it. OpenShift's SCC admission evaluates the *caller*
+   creating a tenant Pod (the front door's ServiceAccount, since it's
+   the one whose token issues `kubectl apply`), and every built-in SCC
+   restricts `seccompProfiles` to `runtime/default` only — confirmed by
+   a real `start-pod` failing with `localhost/wkp-hub-seccomp-no-network.json
+   is not an allowed seccomp profile`. That manifest is an exact copy of
+   the built-in `restricted-v2` SCC with only `seccompProfiles` widened
+   to also allow this one named profile — no host access, no privilege
+   escalation, capabilities still dropped, UID still the namespace's
+   normal arbitrary-range assignment (not `anyuid` — the tenant Pod
+   never asks for a specific UID).
+4. **The image itself needs `kubectl`** (and `psql`, for the manual
    lifecycle test below) — both already bundled by
    [`deploy/hub/Containerfile`](../deploy/hub/Containerfile).
 
