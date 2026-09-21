@@ -1,0 +1,91 @@
+# Stages seccomp-no-network.json onto every node's kubelet seccomp root
+# (default /var/lib/kubelet/seccomp/), a one-time, cluster-wide
+# prerequisite for `KubernetesOrchestrator` (issue #141,
+# docs/adr/0012-pod-orchestrator-abstraction.md's 2026-09-20 addendum):
+# `securityContext.seccompProfile.localhostProfile` references a profile
+# by a path relative to that directory, and the kubelet refuses to start
+# a Pod naming a profile that doesn't already exist on the node it's
+# scheduled to -- there is no way to supply the profile inline the way
+# podman's `--security-opt seccomp=<path>` does.
+#
+# The ConfigMap holding the profile's actual JSON is deliberately NOT
+# defined here -- generate it fresh from the single source of truth
+# (../seccomp-no-network.json) instead of hand-copying content into a
+# second YAML file that can drift out of sync:
+#
+#   kubectl create configmap wkp-hub-seccomp-no-network \
+#     --from-file=seccomp-no-network.json=deploy/hub/seccomp-no-network.json \
+#     -n <namespace> --dry-run=client -o yaml | kubectl apply -f -
+#
+# Apply that first, then this DaemonSet, in whatever namespace `wkp-hub`
+# itself runs in (the DaemonSet's own namespace doesn't matter for
+# reaching node-local `hostPath` -- picking the same namespace as the
+# rest of the deployment is just convention, not a requirement).
+#
+# **Verified against a real OpenShift cluster, not assumed** (see
+# git blame on this comment for the date): writing to a `hostPath`
+# volume at all is genuinely, unavoidably rejected under every
+# restricted/default SCC OpenShift ships --
+# `hostPath volumes are not allowed to be used` is the platform's own
+# admission error, listing every SCC already usable by a plain
+# ServiceAccount as forbidden for this reason. This is real and
+# structural (there is no non-privileged way to write to node-local
+# storage), unlike the `anyuid` grant this same effort initially assumed
+# `wkp-hub`'s own front-door Deployment needed and then found, by
+# testing, that it didn't (`ops/secrets.md` in `paperless-ink/infra`).
+# The fix here is `hostmount-anyuid` (allows `hostPath` + arbitrary UID,
+# short of `privileged` or `hostaccess`'s broader host-namespace access)
+# granted to a **dedicated ServiceAccount used by nothing else** --
+# never the namespace's `default` ServiceAccount, which would extend the
+# grant to every other workload that happens to run under it:
+#
+#   kubectl create serviceaccount wkp-hub-seccomp-installer -n <namespace>
+#   oc adm policy add-scc-to-user hostmount-anyuid \
+#     -z wkp-hub-seccomp-installer -n <namespace>
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wkp-hub-seccomp-profile-installer
+spec:
+  selector:
+    matchLabels:
+      app: wkp-hub-seccomp-installer
+  template:
+    metadata:
+      labels:
+        app: wkp-hub-seccomp-installer
+    spec:
+      serviceAccountName: wkp-hub-seccomp-installer
+      initContainers:
+        - name: install-profile
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command:
+            - /bin/sh
+            - -c
+            - cp /profile/seccomp-no-network.json /host-seccomp/wkp-hub-seccomp-no-network.json
+          volumeMounts:
+            - name: profile-source
+              mountPath: /profile
+            - name: host-seccomp
+              mountPath: /host-seccomp
+      containers:
+        # DaemonSets require a running main container; the actual work
+        # (copying the profile) is done by the init container above, so
+        # this one just idles -- kubelet's own restart policy keeps the
+        # DaemonSet Pod (and therefore the init container's copy step)
+        # re-run if a node's kubelet seccomp directory ever gets wiped
+        # (e.g. after a node's kubelet data is reset).
+        - name: pause
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { cpu: 20m, memory: 16Mi }
+      volumes:
+        - name: profile-source
+          configMap:
+            name: wkp-hub-seccomp-no-network
+        - name: host-seccomp
+          hostPath:
+            path: /var/lib/kubelet/seccomp
+            type: DirectoryOrCreate

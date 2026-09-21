@@ -16,6 +16,7 @@ mod control_plane;
 mod front_door;
 mod http;
 mod hub_ca;
+mod k8s_orchestrator;
 mod tenant_pod;
 mod tenant_repo;
 
