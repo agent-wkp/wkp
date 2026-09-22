@@ -70,9 +70,23 @@ log "checking the index pod's NetworkPolicy actually denies it egress"
 # own failure look like policy enforcement when it isn't proof of
 # anything. Only a passing baseline plus a failing index-pod probe
 # actually isolates the NetworkPolicy's effect.
-if ! kubectl exec "$SERVE_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
-    'echo | cat > /dev/tcp/1.1.1.1/443' 2>/dev/null; then
-    echo "FAIL: baseline probe from the serve pod (no egress policy) failed -- can't tell whether a later index-pod failure means anything" >&2
+#
+# Retried, not single-shot: confirmed by hand that `kubectl wait
+# --for=condition=Ready` can return slightly before OVN-Kubernetes has
+# finished wiring a freshly-scheduled Pod's egress route -- a genuinely
+# Ready, otherwise-unrestricted Pod's very first probe right after
+# Ready failed, then succeeded a few seconds later with no other change.
+baseline_ok=false
+for _ in 1 2 3 4 5; do
+    if kubectl exec "$SERVE_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
+        'echo | cat > /dev/tcp/1.1.1.1/443' 2>/dev/null; then
+        baseline_ok=true
+        break
+    fi
+    sleep 3
+done
+if [ "$baseline_ok" != true ]; then
+    echo "FAIL: baseline probe from the serve pod (no egress policy) failed after retrying -- can't tell whether a later index-pod failure means anything" >&2
     exit 1
 fi
 if kubectl exec "$INDEX_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
