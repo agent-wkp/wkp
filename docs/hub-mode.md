@@ -87,13 +87,14 @@ remote cluster via a `~/.kube/config`-style kubeconfig from outside.
 Three things beyond `serve`'s usual environment variables:
 
 1. **RBAC**: a namespaced `ServiceAccount` bound to a `Role` granting
-   `get`/`list`/`watch`/`create`/`delete` on `pods`, `services`,
-   `persistentvolumeclaims`, and `networkpolicies` in the one namespace
-   `wkp-hub` runs in — never cluster-admin, never a `ClusterRole`.
-   `persistentvolumeclaims` is retained even though this orchestrator no
-   longer creates one per tenant — `kubectl apply` still reads the
-   shared, pre-existing one as part of applying the Pod specs that
-   reference it.
+   `get`/`list`/`watch`/`create`/`delete` on `pods`, `services`, and
+   `networkpolicies` in the one namespace `wkp-hub` runs in — never
+   cluster-admin, never a `ClusterRole`. No `persistentvolumeclaims`
+   grant: a Pod manifest referencing the shared PVC by name needs no
+   RBAC on the PVC resource itself, confirmed by hand with a throwaway
+   ServiceAccount holding zero PVC permissions that still successfully
+   created and ran a Pod mounting it — the kubelet mounts the volume
+   with its own node-level credentials, not the Pod-creator's.
 2. **The shared RWX storage PVC must already exist, and the front door
    itself must also mount it** —
    `paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml` (a

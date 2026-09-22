@@ -369,13 +369,51 @@ fn render_kubeconfig(host: &str, port: &str, namespace: &str) -> String {
 /// needed there (ADR-0012's own note that the traffic-proxying half was
 /// already runtime-agnostic).
 ///
+/// The `NetworkPolicy` document comes *first*, before either Pod: `kubectl
+/// apply -f -` on a multi-document YAML issues one API request per
+/// document, in order, not atomically, so applying the policy before the
+/// index Pod exists at all closes the window where a scheduled,
+/// already-running `index-worker` container could make an outbound
+/// connection before its policy is admitted. This narrows the race, it
+/// does not provably eliminate it -- Kubernetes has no generic, portable
+/// way to block on "this NetworkPolicy is now enforced by the CNI," only
+/// on the API object existing. In practice, on this cluster, the gap left
+/// is the time between two sequential `kubectl apply` API calls (single-
+/// digit milliseconds), dwarfed by how long a container takes to actually
+/// start; `index-worker`'s own container hasn't been created, let alone
+/// started a socket, by the time its NetworkPolicy document is admitted.
+///
+/// **Node-IP traffic, not just external egress, was checked, not
+/// assumed**: standard Kubernetes `NetworkPolicy` documentation notes
+/// that egress rules do not universally cover Pod-to-node-IP traffic on
+/// every CNI. Tested by hand against this cluster's actual CNI (OVN-
+/// Kubernetes) with a throwaway Pod carrying the identical `egress: []`
+/// policy: connections to the node's own `InternalIP` on both port 10250
+/// (kubelet) and port 22 (sshd) timed out identically to the external-
+/// address control probe, not a fast refusal -- consistent with the same
+/// enforcement, not an exemption. This is a property of OVN-Kubernetes
+/// specifically, not a portable guarantee of `NetworkPolicy` in general;
+/// re-verify if this orchestrator ever targets a cluster with a
+/// different CNI.
+///
 /// Extracted as its own pure function, mirroring
 /// [`crate::tenant_pod::repo_mount_arg`], so a test can assert on the
 /// generated YAML without a real cluster to apply it against.
 fn tenant_manifest(namespace: &str, shared_pvc: &str, image: &str, tenant_slug: &str) -> String {
     let mount_path = format!("/srv/wkp-hub/repos/{tenant_slug}");
     format!(
-        r#"apiVersion: v1
+        r#"apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {deny_egress}
+  namespace: {namespace}
+spec:
+  podSelector:
+    matchLabels: {{ app: {index_pod} }}
+  policyTypes: ["Egress"]
+  egress: []
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: {serve_pod}
@@ -436,17 +474,6 @@ spec:
     - name: shared-repos
       persistentVolumeClaim:
         claimName: {shared_pvc}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {deny_egress}
-  namespace: {namespace}
-spec:
-  podSelector:
-    matchLabels: {{ app: {index_pod} }}
-  policyTypes: ["Egress"]
-  egress: []
 ---
 apiVersion: v1
 kind: Service
@@ -591,18 +618,47 @@ mod tests {
     #[test]
     fn tenant_manifest_valid_yaml_with_four_documents() {
         // Cheap structural check without a real cluster to apply
-        // against -- four `---`-separated documents (serve Pod, index
-        // Pod, NetworkPolicy, Service), each independently well-formed.
+        // against -- four `---`-separated documents (NetworkPolicy,
+        // serve Pod, index Pod, Service), each independently well-formed.
         let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
         let docs: Vec<&str> = manifest.split("---").collect();
         assert_eq!(
             docs.len(),
             4,
-            "expected serve Pod, index Pod, NetworkPolicy, and Service documents"
+            "expected NetworkPolicy, serve Pod, index Pod, and Service documents"
         );
         for doc in docs {
             serde_yaml_value(doc);
         }
+    }
+
+    #[test]
+    fn tenant_manifest_applies_the_networkpolicy_before_either_pod() {
+        // `kubectl apply -f -` issues one API call per document, in
+        // order, not atomically -- the NetworkPolicy must be admitted
+        // before the index Pod can possibly exist, closing the window
+        // where an already-scheduled index-worker container could open
+        // a connection before its egress-deny policy applies. See
+        // tenant_manifest's own doc comment for why this narrows, but
+        // doesn't provably eliminate, the race.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        let policy_pos = manifest
+            .find("kind: NetworkPolicy")
+            .expect("NetworkPolicy must be present");
+        let serve_pos = manifest
+            .find("name: wkp-tenant-acme-serve")
+            .expect("serve Pod must be present");
+        let index_pos = manifest
+            .find("name: wkp-tenant-acme-index\n")
+            .expect("index Pod must be present");
+        assert!(
+            policy_pos < serve_pos,
+            "NetworkPolicy must precede the serve Pod"
+        );
+        assert!(
+            policy_pos < index_pos,
+            "NetworkPolicy must precede the index Pod"
+        );
     }
 
     /// A tiny hand-rolled structural check, not a real YAML parser --
