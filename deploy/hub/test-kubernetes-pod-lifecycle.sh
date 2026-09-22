@@ -22,12 +22,34 @@
 # already has: `wkp-hub` on PATH, `kubectl`, `git`, `psql` (the
 # `deploy/hub/Containerfile` image has all four), a ServiceAccount with
 # the RBAC `docs/adr/0012-pod-orchestrator-abstraction.md`'s addendum
-# describes (get/list/watch/create/delete on pods/services/pvcs/
+# describes (get/list/watch/create/delete on pods/services/
 # networkpolicies, scoped to one namespace), and the shared RWX storage
 # PVC (`paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml`)
 # already applied. Simplest concrete way to run it: `oc exec` into the
 # real front-door Deployment once it's live, with
 # `WKP_HUB_POD_ORCHESTRATOR=kubernetes` already set in its env.
+#
+# One thing production never needs but THIS SCRIPT does: `create` on
+# `pods/exec` (a separate RBAC subresource from `pods` itself), for the
+# `kubectl exec` egress probes below. Confirmed by hand, the hard way:
+# without it, every `kubectl exec` in this script fails with "cannot
+# create resource pods/exec", and -- because that error was piped to
+# `/dev/null` in an earlier version of this script -- looked exactly
+# like flaky NetworkPolicy/CNI timing instead of the deterministic RBAC
+# gap it actually was, since the same commands run by hand from an
+# operator's own broader kubeconfig (not this identity) worked every
+# time. Do not add `pods/exec` to the production Role in
+# `paperless-ink/infra`'s `20-rbac.yaml` for this -- grant it via a
+# separate, test-only Role/RoleBinding bound to the same ServiceAccount
+# only while running this script, e.g.:
+#
+#   kubectl create role wkp-hub-k8s-lifecycle-test-exec \
+#     --verb=create --resource=pods/exec -n <namespace>
+#   kubectl create rolebinding wkp-hub-k8s-lifecycle-test-exec \
+#     --role=wkp-hub-k8s-lifecycle-test-exec \
+#     --serviceaccount=<namespace>:wkp-hub-frontdoor -n <namespace>
+#
+# and remove both afterward.
 set -euo pipefail
 
 WKP_HUB_BIN="${WKP_HUB_BIN:-wkp-hub}"
@@ -66,37 +88,21 @@ log "checking the index pod's NetworkPolicy actually denies it egress"
 # Run the identical probe from the *serve* Pod first (no egress policy
 # applies to it) and require it to succeed -- otherwise a probe failure
 # for any other reason (no external route from this cluster, the shell
-# lacking /dev/tcp, a transient network blip) would make the index pod's
-# own failure look like policy enforcement when it isn't proof of
-# anything. Only a passing baseline plus a failing index-pod probe
-# actually isolates the NetworkPolicy's effect.
-#
-# Retried, not single-shot, and generously so: confirmed by hand that
-# `kubectl wait --for=condition=Ready` can return before OVN-Kubernetes
-# has finished wiring a freshly-scheduled Pod's egress route -- a
-# genuinely Ready, otherwise-unrestricted Pod's probe right after Ready
-# failed on some runs and succeeded immediately on others, with nothing
-# else different, and on one run stayed failing for over 15s before
-# this budget was widened. Observed only on a single-node lab cluster
-# that had already churned through hundreds of Pods earlier the same
-# day (`wbos.podzone.org`) -- plausibly OVN flow-table/reconciliation
-# pressure specific to that history, not a property of the design
-# itself, but wide margin here costs nothing on a real deployment.
-baseline_ok=false
-for _ in $(seq 1 20); do
-    if kubectl exec "$SERVE_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
-        'echo | cat > /dev/tcp/1.1.1.1/443' 2>/dev/null; then
-        baseline_ok=true
-        break
-    fi
-    sleep 3
-done
-if [ "$baseline_ok" != true ]; then
-    echo "FAIL: baseline probe from the serve pod (no egress policy) failed after retrying for a minute -- can't tell whether a later index-pod failure means anything" >&2
+# lacking /dev/tcp, a missing pods/exec grant -- see this script's own
+# header) would make the index pod's own failure look like policy
+# enforcement when it isn't proof of anything. Only a passing baseline
+# plus a failing index-pod probe actually isolates the NetworkPolicy's
+# effect. stderr is deliberately NOT suppressed here: an earlier version
+# of this script redirected it to /dev/null, which once turned a plain,
+# deterministic RBAC error into what looked exactly like flaky
+# CNI/NetworkPolicy timing -- see the header comment for the full story.
+if ! kubectl exec "$SERVE_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
+    'echo | cat > /dev/tcp/1.1.1.1/443'; then
+    echo "FAIL: baseline probe from the serve pod (no egress policy) failed -- can't tell whether a later index-pod failure means anything. Check the kubectl exec output above for the real reason (a missing pods/exec RBAC grant looks identical to a network failure unless you read it)." >&2
     exit 1
 fi
 if kubectl exec "$INDEX_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
-    'echo | cat > /dev/tcp/1.1.1.1/443' 2>/dev/null; then
+    'echo | cat > /dev/tcp/1.1.1.1/443'; then
     echo "FAIL: index pod reached an external address -- NetworkPolicy is not enforcing" >&2
     exit 1
 fi
