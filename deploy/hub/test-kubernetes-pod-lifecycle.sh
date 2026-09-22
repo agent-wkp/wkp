@@ -71,13 +71,19 @@ log "checking the index pod's NetworkPolicy actually denies it egress"
 # anything. Only a passing baseline plus a failing index-pod probe
 # actually isolates the NetworkPolicy's effect.
 #
-# Retried, not single-shot: confirmed by hand that `kubectl wait
-# --for=condition=Ready` can return slightly before OVN-Kubernetes has
-# finished wiring a freshly-scheduled Pod's egress route -- a genuinely
-# Ready, otherwise-unrestricted Pod's very first probe right after
-# Ready failed, then succeeded a few seconds later with no other change.
+# Retried, not single-shot, and generously so: confirmed by hand that
+# `kubectl wait --for=condition=Ready` can return before OVN-Kubernetes
+# has finished wiring a freshly-scheduled Pod's egress route -- a
+# genuinely Ready, otherwise-unrestricted Pod's probe right after Ready
+# failed on some runs and succeeded immediately on others, with nothing
+# else different, and on one run stayed failing for over 15s before
+# this budget was widened. Observed only on a single-node lab cluster
+# that had already churned through hundreds of Pods earlier the same
+# day (`wbos.podzone.org`) -- plausibly OVN flow-table/reconciliation
+# pressure specific to that history, not a property of the design
+# itself, but wide margin here costs nothing on a real deployment.
 baseline_ok=false
-for _ in 1 2 3 4 5; do
+for _ in $(seq 1 20); do
     if kubectl exec "$SERVE_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
         'echo | cat > /dev/tcp/1.1.1.1/443' 2>/dev/null; then
         baseline_ok=true
@@ -86,7 +92,7 @@ for _ in 1 2 3 4 5; do
     sleep 3
 done
 if [ "$baseline_ok" != true ]; then
-    echo "FAIL: baseline probe from the serve pod (no egress policy) failed after retrying -- can't tell whether a later index-pod failure means anything" >&2
+    echo "FAIL: baseline probe from the serve pod (no egress policy) failed after retrying for a minute -- can't tell whether a later index-pod failure means anything" >&2
     exit 1
 fi
 if kubectl exec "$INDEX_POD" -n "$NAMESPACE" -- timeout 5 sh -c \
