@@ -94,17 +94,29 @@ Three things beyond `serve`'s usual environment variables:
    longer creates one per tenant — `kubectl apply` still reads the
    shared, pre-existing one as part of applying the Pod specs that
    reference it.
-2. **The shared RWX storage PVC must already exist** —
+2. **The shared RWX storage PVC must already exist, and the front door
+   itself must also mount it** —
    `paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml` (a
    `PersistentVolumeClaim` named `tenant-repos-shared` by default,
    overridable via `WKP_HUB_K8S_SHARED_PVC`), backed by that repo's
-   `containers/nfs-server/` — this orchestrator only ever mounts it (via
-   a per-tenant `subPath`), it never creates it. This cluster's only
-   StorageClass is `ReadWriteOnce`-only, so a tenant's `serve` and
-   `index` Pods — two separate Pods needing concurrent access to the
-   same data — need this shared `ReadWriteMany` volume; see that repo's
-   `containers/nfs-server/README.md` for why a plain NFS server backs
-   it, not a CSI driver or a per-tenant volume.
+   `containers/nfs-server/` — `KubernetesOrchestrator` only ever mounts
+   it into a tenant's two Pods (via a per-tenant `subPath`), it never
+   creates it. This cluster's only StorageClass is `ReadWriteOnce`-only,
+   so a tenant's `serve` and `index` Pods — two separate Pods needing
+   concurrent access to the same data — need this shared `ReadWriteMany`
+   volume; see that repo's `containers/nfs-server/README.md` for why a
+   plain NFS server backs it, not a CSI driver or a per-tenant volume.
+   **Confirmed by hand, not assumed**: `wkp-hub tenant create`'s repo
+   provisioning (`tenant_repo::provision_tenant_repo`) writes a tenant's
+   bare repo directly at `{WKP_HUB_REPOS_ROOT}/<slug>` from the front
+   door's *own* process — a step that predates this backend and is
+   orchestrator-agnostic — so the front door's own Deployment needs this
+   same PVC mounted at `/srv/wkp-hub/repos` (the whole PVC, no
+   `subPath`, since it provisions every tenant, not just one) *in
+   addition to* whatever `KubernetesOrchestrator` mounts into each
+   tenant's own Pods. Without it, `tenant create` fails with a
+   `Permission denied` writing to that path — confirmed against the
+   real cluster while validating this backend end-to-end.
 3. **The image itself needs `kubectl`** (and `psql`, for the manual
    lifecycle test below) — both already bundled by
    [`deploy/hub/Containerfile`](../deploy/hub/Containerfile).
