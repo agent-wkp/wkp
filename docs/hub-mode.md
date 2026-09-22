@@ -74,65 +74,79 @@ migration-file step to run by hand.
 
 `WKP_HUB_POD_ORCHESTRATOR=kubernetes` (issue #141,
 [`docs/adr/0012-pod-orchestrator-abstraction.md`](adr/0012-pod-orchestrator-abstraction.md)'s
-2026-09-20 addendum) runs the front door as an ordinary Kubernetes/
-OpenShift workload instead of a single podman host, with tenant
-isolation via real Pods, Services, and PersistentVolumeClaims instead of
-podman pods. This backend only supports **in-cluster** authentication —
-`wkp-hub` must itself run as a Pod in the cluster it manages, using that
-Pod's own projected ServiceAccount token; there is no support for
-pointing it at a remote cluster via a `~/.kube/config`-style kubeconfig
-from outside.
+2026-09-21 addendum) runs the front door as an ordinary Kubernetes/
+OpenShift workload instead of a single podman host, with each tenant
+isolated across **two** Pods (`serve`, `index`) rather than podman's one
+pod/two containers, a shared `NetworkPolicy`-isolated storage volume
+instead of per-tenant PersistentVolumeClaims, and a `Service` per tenant.
+This backend only supports **in-cluster** authentication — `wkp-hub` must
+itself run as a Pod in the cluster it manages, using that Pod's own
+projected ServiceAccount token; there is no support for pointing it at a
+remote cluster via a `~/.kube/config`-style kubeconfig from outside.
 
-Four things beyond `serve`'s usual environment variables — the last two
-are **SCC grants confirmed necessary against a real OpenShift cluster**,
-not assumed, so don't skip them expecting the defaults to be enough:
+Three things beyond `serve`'s usual environment variables:
 
 1. **RBAC**: a namespaced `ServiceAccount` bound to a `Role` granting
    `get`/`list`/`watch`/`create`/`delete` on `pods`, `services`, and
-   `persistentvolumeclaims` in the one namespace `wkp-hub` runs in —
-   never cluster-admin, never a `ClusterRole`.
-2. **The seccomp profile, staged cluster-wide, once**:
-   [`deploy/hub/k8s/seccomp-daemonset.yaml`](../deploy/hub/k8s/seccomp-daemonset.yaml)
-   copies `deploy/hub/seccomp-no-network.json` onto every node's kubelet
-   seccomp root — required because a tenant's `index-worker` container
-   gets its "no network" property from
-   `securityContext.seccompProfile.localhostProfile` on this backend
-   (there is no Kubernetes equivalent of podman's `--network none`), and
-   the kubelet refuses to start a Pod naming a profile that isn't
-   already on-node. That DaemonSet's `hostPath` volume itself needs the
-   `hostmount-anyuid` SCC granted to a **dedicated** ServiceAccount
-   (never the namespace's `default`) — see that manifest's own comment
-   for the exact command; OpenShift's own admission error is explicit
-   that no default SCC permits `hostPath` at all.
-3. **The front door's own ServiceAccount needs
-   [`deploy/hub/k8s/tenant-pod-scc.yaml`](../deploy/hub/k8s/tenant-pod-scc.yaml)**
-   bound to it. OpenShift's SCC admission evaluates the *caller*
-   creating a tenant Pod (the front door's ServiceAccount, since it's
-   the one whose token issues `kubectl apply`), and every built-in SCC
-   restricts `seccompProfiles` to `runtime/default` only — confirmed by
-   a real `start-pod` failing with `localhost/wkp-hub-seccomp-no-network.json
-   is not an allowed seccomp profile`. That manifest is an exact copy of
-   the built-in `restricted-v2` SCC with only `seccompProfiles` widened
-   to also allow this one named profile — no host access, no privilege
-   escalation, capabilities still dropped, UID still the namespace's
-   normal arbitrary-range assignment (not `anyuid` — the tenant Pod
-   never asks for a specific UID).
-4. **The image itself needs `kubectl`** (and `psql`, for the manual
+   `networkpolicies` in the one namespace `wkp-hub` runs in — never
+   cluster-admin, never a `ClusterRole`. No `persistentvolumeclaims`
+   grant: a Pod manifest referencing the shared PVC by name needs no
+   RBAC on the PVC resource itself, confirmed by hand with a throwaway
+   ServiceAccount holding zero PVC permissions that still successfully
+   created and ran a Pod mounting it — the kubelet mounts the volume
+   with its own node-level credentials, not the Pod-creator's.
+2. **The shared RWX storage PVC must already exist, and the front door
+   itself must also mount it** —
+   `paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml` (a
+   `PersistentVolumeClaim` named `tenant-repos-shared` by default,
+   overridable via `WKP_HUB_K8S_SHARED_PVC`), backed by that repo's
+   `containers/nfs-server/` — `KubernetesOrchestrator` only ever mounts
+   it into a tenant's two Pods (via a per-tenant `subPath`), it never
+   creates it. This cluster's only StorageClass is `ReadWriteOnce`-only,
+   so a tenant's `serve` and `index` Pods — two separate Pods needing
+   concurrent access to the same data — need this shared `ReadWriteMany`
+   volume; see that repo's `containers/nfs-server/README.md` for why a
+   plain NFS server backs it, not a CSI driver or a per-tenant volume.
+   **Confirmed by hand, not assumed**: `wkp-hub tenant create`'s repo
+   provisioning (`tenant_repo::provision_tenant_repo`) writes a tenant's
+   bare repo directly at `{WKP_HUB_REPOS_ROOT}/<slug>` from the front
+   door's *own* process — a step that predates this backend and is
+   orchestrator-agnostic — so the front door's own Deployment needs this
+   same PVC mounted at `/srv/wkp-hub/repos` (the whole PVC, no
+   `subPath`, since it provisions every tenant, not just one) *in
+   addition to* whatever `KubernetesOrchestrator` mounts into each
+   tenant's own Pods. Without it, `tenant create` fails with a
+   `Permission denied` writing to that path — confirmed against the
+   real cluster while validating this backend end-to-end.
+3. **The image itself needs `kubectl`** (and `psql`, for the manual
    lifecycle test below) — both already bundled by
    [`deploy/hub/Containerfile`](../deploy/hub/Containerfile).
 
 No client library is involved — `KubernetesOrchestrator` shells out to
 `kubectl` exactly the way the podman backend shells out to `podman`; see
 the ADR addendum linked above for the full reasoning behind every choice
-(why a bare `Pod` and not a `Deployment`, why a PVC per tenant, why
-`tokenFile` rather than a literal token).
+(why two Pods and not one with two containers, why a shared PVC and not
+one per tenant, why a bare `Pod` and not a `Deployment`, why `tokenFile`
+rather than a literal token).
+
+**No seccomp profile, no DaemonSet, no custom SCC.** An earlier version
+of this backend gave `index-worker`'s network isolation to a seccomp
+profile staged cluster-wide by a DaemonSet writing to a `hostPath`
+volume — built and tested against a real OpenShift cluster, and found to
+need a dedicated ServiceAccount granted `hostmount-anyuid` plus a second
+custom SCC on the front door's own ServiceAccount, just to get one file
+onto every node. `index-worker` now runs in its own Pod with a
+`NetworkPolicy` denying all its egress instead — a plain namespaced API
+object with no SCC dimension at all. See the ADR's 2026-09-21 addendum
+for the full story if you're wondering why this looks different from an
+older deployment.
 
 **Verifying a real deployment**:
 [`deploy/hub/test-kubernetes-pod-lifecycle.sh`](../deploy/hub/test-kubernetes-pod-lifecycle.sh)
 is the Kubernetes analogue of `test-pod-lifecycle.sh` — not wired into
 CI (no Kubernetes cluster available there), run by hand against a real
 cluster, e.g. `oc exec` into the running front-door Deployment once RBAC
-and the seccomp DaemonSet are both applied.
+is applied and the shared storage PVC already exists.
 
 ## Create a tenant
 

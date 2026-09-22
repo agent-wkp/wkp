@@ -4,10 +4,10 @@
 //! Built the same way [`crate::tenant_pod::PodmanOrchestrator`] is --
 //! shelling out to a CLI (`kubectl` here, `podman` there) and generating
 //! plain manifest text, not a Kubernetes client library. See
-//! `docs/adr/0012-pod-orchestrator-abstraction.md`'s 2026-09-20 addendum
+//! `docs/adr/0012-pod-orchestrator-abstraction.md`'s 2026-09-21 addendum
 //! for the fuller reasoning behind every choice below, and
 //! `docs/hub-mode.md`'s Kubernetes section for the operator-facing
-//! deployment story (RBAC, the seccomp-profile DaemonSet).
+//! deployment story (RBAC, the shared storage PVC).
 //!
 //! ## Why `kubectl`, not a Kubernetes client crate
 //!
@@ -21,36 +21,104 @@
 //! library -- CLAUDE.md's slim-core rule, applied the same way ADR-0012
 //! already applied it to the podman side.
 //!
-//! ## Bare `Pod`, not `Deployment` -- deliberate, not an oversight
+//! ## Two Pods per tenant, not one Pod with two containers (2026-09-21
+//! correction -- the first version of this file got this wrong)
+//!
+//! The podman backend's `index-worker` gets its "no network" property
+//! two independent ways: `--network none` *and* a seccomp profile
+//! (`tenant_pod.rs`'s own module doc comment). This file's first version
+//! assumed the seccomp half alone was sufficient on Kubernetes, staged
+//! cluster-wide by a DaemonSet writing the profile to every node's
+//! kubelet seccomp root via a `hostPath` volume. Built and tested
+//! against a real OpenShift cluster (`wbos.podzone.org`,
+//! `paperless-ink/infra`), that turned out to need far more privilege
+//! than it looked like on paper: every default/restricted SCC OpenShift
+//! ships rejects `hostPath` outright ("not allowed to be used"), forcing
+//! a dedicated ServiceAccount granted `hostmount-anyuid` just to stage
+//! the profile file, plus a *second* custom SCC on the front door's own
+//! ServiceAccount (SCC admission checks the *caller* creating a Pod, not
+//! just the Pod's own spec) to let it reference that profile at all. All
+//! of that privilege existed to install one file onto every node -- a
+//! real, structural requirement of `securityContext.seccompProfile.
+//! localhostProfile` (the kubelet refuses to admit a Pod naming a
+//! profile that isn't already on-node; there is no way to supply one
+//! inline the way podman's `--security-opt seccomp=<path>` does), not a
+//! configuration mistake.
+//!
+//! **Corrected design: two separate Pods per tenant** (`wkp-tenant-
+//! <slug>-serve`, `wkp-tenant-<slug>-index`), with `index-worker`'s "no
+//! network" property enforced by a per-tenant `NetworkPolicy` denying
+//! all egress from the index Pod, matched by label. OVN-Kubernetes (this
+//! cluster's CNI, and the default for OpenShift generally) fully
+//! enforces standard `NetworkPolicy` -- confirmed against the real
+//! cluster before committing to this design, the same way the seccomp
+//! approach's actual privilege cost was confirmed by building it, not
+//! assumed. This needs zero cluster-wide staging (no DaemonSet, no
+//! `hostPath`, no dedicated installer ServiceAccount) and zero extra SCC
+//! grants beyond the RBAC this orchestrator already needed --
+//! `NetworkPolicy` is a plain namespaced API object any ServiceAccount
+//! with `create`/`delete` on it can manage, with no SCC dimension at
+//! all. It trades one thing for another: two Pods to schedule instead of
+//! one, and no single "the tenant's Pod" object -- every call site in
+//! this file that used to name one Pod now names two.
+//!
+//! ## Storage: one shared `PersistentVolumeClaim`, `subPath`-isolated per
+//! tenant -- not one PVC per tenant (2026-09-21 correction, same
+//! investigation as above)
+//!
+//! The first version of this file created a fresh per-tenant PVC on
+//! every `start_pod`, reasoning that a single shared PVC would "lose the
+//! per-tenant filesystem isolation ADR-0014 already established." That
+//! reasoning held for a *single-Pod* tenant (podman's model, and this
+//! file's original one): one PVC, one Pod, trivial isolation by
+//! construction. It stops holding once `index-worker` is a *second*,
+//! separate Pod (previous section) needing concurrent access to the same
+//! tenant data as `serve` -- this cluster's only StorageClass
+//! (`lvms-vg1`, topolvm) is `ReadWriteOnce` only, so two Pods sharing one
+//! tenant's data need `ReadWriteMany`, and creating a fresh RWX
+//! PersistentVolume per tenant means running a real NFS (or similar)
+//! server *per tenant*, which is far more infrastructure than one shared
+//! server multiplexing every tenant behind `subPath`.
+//!
+//! **Corrected design**: one namespace-wide RWX PVC
+//! (`paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml`,
+//! backed by `containers/nfs-server/` -- a pure-Rust NFS server chosen
+//! there specifically because it needs no elevated privilege either,
+//! for reasons parallel to this file's own seccomp-vs-NetworkPolicy
+//! story; see that repo's `containers/nfs-server/README.md`), with each
+//! tenant isolated by `subPath: <tenant_slug>` in both Pods' volume
+//! mounts rather than by owning a whole distinct PV. Per-tenant
+//! isolation is preserved (`subPath` confines each tenant to its own
+//! subtree; the shared server itself enforces no per-client identity, so
+//! network-level isolation -- `paperless-ink/infra`'s own
+//! `NetworkPolicy` on the storage server -- is what keeps arbitrary
+//! cluster workloads from reaching it at all, a concern that predates
+//! and is independent of this file). An init container in each Pod
+//! `mkdir -p`s the tenant's subdirectory against the *unscoped* mount
+//! (no `subPath`) before the main container mounts the same PVC *with*
+//! `subPath` -- `subPath` targets are not guaranteed to be created for
+//! every volume plugin/Kubernetes version, so this doesn't rely on that.
+//!
+//! `stop_pod` still never touches this PVC (module-wide invariant,
+//! unchanged from the first version): it's namespace-wide, shared by
+//! every tenant, definitionally never a single tenant's `stop_pod` to
+//! delete.
+//!
+//! ## Bare `Pod`s, not `Deployment`s -- deliberate, not an oversight
 //!
 //! A `Deployment`'s controller actively reconciles its Pod back into
 //! existence if deleted. [`stop_pod`](KubernetesOrchestrator::stop_pod)
-//! deleting a tenant's `Pod` object is how idle-reap actually takes
-//! effect here -- wrapping it in a `Deployment` would have the
-//! controller immediately recreate what the reaper just tore down,
-//! silently defeating M5-7's whole idle-cost-savings design. A bare
-//! `Pod` with the default `restartPolicy: Always` still gets kubelet's
-//! own container-level restart-on-crash for free (unlike podman's own
+//! deleting a tenant's Pods is how idle-reap actually takes effect here
+//! -- wrapping them in `Deployment`s would have the controller
+//! immediately recreate what the reaper just tore down, silently
+//! defeating M5-7's whole idle-cost-savings design. A bare `Pod` with
+//! the default `restartPolicy: Always` still gets kubelet's own
+//! container-level restart-on-crash for free (unlike podman's own
 //! `pod_is_running`/`pod rm -f`-then-recreate dance, which exists
 //! specifically because podman *doesn't* offer that) -- so this loses
 //! nothing a `Deployment` would have given for the crash-recovery case,
 //! while keeping this orchestrator's own start/stop calls the sole
-//! authority over whether the Pod exists at all.
-//!
-//! ## Storage: one `PersistentVolumeClaim` per tenant, created once
-//!
-//! Chosen over `hostPath` (ties every tenant to one specific node, no
-//! real multi-node story) and over a single shared PVC (loses the
-//! per-tenant filesystem isolation ADR-0014 already established for the
-//! podman backend). [`start_pod`](KubernetesOrchestrator::start_pod)'s
-//! generated manifest includes the PVC every time (an `apply`, not a
-//! `create` -- idempotent, matches the rest of this function), but
-//! [`stop_pod`](KubernetesOrchestrator::stop_pod) never deletes it,
-//! mirroring the podman backend's own "stop the container, keep the
-//! bind-mounted data" behavior (design 8.2/ADR-0010: bare repos persist
-//! outside any one pod's own ephemeral filesystem). Deleting a tenant's
-//! actual data is `wkp-hub tenant delete`'s job (not yet built, tracked
-//! separately), never an implicit side effect of a pod stopping.
+//! authority over whether either Pod exists at all.
 //!
 //! ## Credentials: a generated in-cluster kubeconfig, not a raw token flag
 //!
@@ -88,6 +156,16 @@ const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 /// to be mounted into the process running it.
 const NAMESPACE_ENV: &str = "WKP_HUB_K8S_NAMESPACE";
 
+/// Overrides the name of the namespace-wide shared RWX PVC every
+/// tenant's two Pods mount (via `subPath`) instead of owning one each --
+/// see the module doc comment's storage section. Defaults to the name
+/// `paperless-ink/infra`'s `manifests/70-shared-tenant-storage.yaml`
+/// actually creates, so a real deployment needs no configuration; the
+/// override exists for the same reason `NAMESPACE_ENV` does (a manual
+/// test against a scratch namespace/PVC name).
+const SHARED_PVC_ENV: &str = "WKP_HUB_K8S_SHARED_PVC";
+const DEFAULT_SHARED_PVC: &str = "tenant-repos-shared";
+
 /// Where the generated kubeconfig lives. A fixed path, not a fresh
 /// `tempfile::NamedTempFile` per call -- every `kubectl` invocation
 /// across this orchestrator's lifetime reuses the one written at
@@ -99,6 +177,7 @@ const KUBECONFIG_PATH: &str = "/tmp/wkp-hub-kubeconfig.yaml";
 /// doc comment for the shape of every decision behind this.
 pub struct KubernetesOrchestrator {
     namespace: String,
+    shared_pvc: String,
 }
 
 impl KubernetesOrchestrator {
@@ -114,8 +193,16 @@ impl KubernetesOrchestrator {
             Err(std::env::VarError::NotPresent) => read_in_cluster_namespace()?,
             Err(e) => return Err(format!("{NAMESPACE_ENV}: {e}")),
         };
+        let shared_pvc = match std::env::var(SHARED_PVC_ENV) {
+            Ok(name) => name,
+            Err(std::env::VarError::NotPresent) => DEFAULT_SHARED_PVC.to_string(),
+            Err(e) => return Err(format!("{SHARED_PVC_ENV}: {e}")),
+        };
         write_kubeconfig(&namespace)?;
-        Ok(Self { namespace })
+        Ok(Self {
+            namespace,
+            shared_pvc,
+        })
     }
 
     fn kubectl(&self, args: &[&str]) -> Result<std::process::Output, String> {
@@ -165,17 +252,24 @@ impl KubernetesOrchestrator {
 impl PodOrchestrator for KubernetesOrchestrator {
     /// `repos_root` is intentionally unused: that parameter names a
     /// host path for the podman backend's bind mount, which has no
-    /// meaning here -- this backend's storage is a `PersistentVolumeClaim`
-    /// per tenant instead (module doc comment).
+    /// meaning here -- this backend's storage is the shared RWX PVC
+    /// named by [`SHARED_PVC_ENV`] instead (module doc comment).
     fn start_pod(&self, image: &str, _repos_root: &Path, tenant_slug: &str) -> Result<(), String> {
-        self.apply(&tenant_manifest(&self.namespace, image, tenant_slug))
+        self.apply(&tenant_manifest(
+            &self.namespace,
+            &self.shared_pvc,
+            image,
+            tenant_slug,
+        ))
     }
 
     fn stop_pod(&self, tenant_slug: &str) -> Result<(), String> {
         let output = self.kubectl(&[
             "delete",
-            &format!("pod/wkp-tenant-{tenant_slug}"),
+            &format!("pod/{}", serve_pod_name(tenant_slug)),
+            &format!("pod/{}", index_pod_name(tenant_slug)),
             &format!("service/{tenant_slug}"),
+            &format!("networkpolicy/{}", index_deny_egress_name(tenant_slug)),
             "-n",
             &self.namespace,
             "--ignore-not-found",
@@ -189,6 +283,18 @@ impl PodOrchestrator for KubernetesOrchestrator {
             ))
         }
     }
+}
+
+fn serve_pod_name(tenant_slug: &str) -> String {
+    format!("wkp-tenant-{tenant_slug}-serve")
+}
+
+fn index_pod_name(tenant_slug: &str) -> String {
+    format!("wkp-tenant-{tenant_slug}-index")
+}
+
+fn index_deny_egress_name(tenant_slug: &str) -> String {
+    format!("wkp-tenant-{tenant_slug}-index-deny-egress")
 }
 
 fn read_in_cluster_namespace() -> Result<String, String> {
@@ -252,48 +358,77 @@ fn render_kubeconfig(host: &str, port: &str, namespace: &str) -> String {
     )
 }
 
-/// The exact manifest [`KubernetesOrchestrator::start_pod`] applies: a
-/// `PersistentVolumeClaim` (module doc comment), a bare `Pod` running
-/// the same two containers the podman backend does (`serve-tenant`,
-/// `index-worker`), and a `Service` so the front door can reach it by
-/// the plain `tenant_slug` hostname `http.rs`'s `proxy_to_tenant_pod`
-/// already builds -- Kubernetes' own intra-namespace DNS resolves a
-/// bare Service name with no code change needed there (ADR-0012's own
-/// note that the traffic-proxying half was already runtime-agnostic).
+/// The exact manifest [`KubernetesOrchestrator::start_pod`] applies: two
+/// Pods (`serve`, `index` -- module doc comment on why not one Pod with
+/// two containers, and not a `Deployment`), each mounting the shared RWX
+/// PVC at its own `subPath`, a `NetworkPolicy` denying all egress from
+/// the index Pod, and a `Service` so the front door can reach the serve
+/// Pod by the plain `tenant_slug` hostname `http.rs`'s
+/// `proxy_to_tenant_pod` already builds -- Kubernetes' own
+/// intra-namespace DNS resolves a bare Service name with no code change
+/// needed there (ADR-0012's own note that the traffic-proxying half was
+/// already runtime-agnostic).
 ///
-/// `index-worker`'s `securityContext.seccompProfile` is this backend's
-/// equivalent of the podman backend's `--network none` (module doc
-/// comment on why: no per-container network-namespace opt-out exists
-/// in the Kubernetes Pod API) -- it requires the named profile to
-/// already exist on whatever node this Pod is scheduled to, staged by
-/// `deploy/hub/k8s/seccomp-daemonset.yaml`, not by this code.
+/// The `NetworkPolicy` document comes *first*, before either Pod: `kubectl
+/// apply -f -` on a multi-document YAML issues one API request per
+/// document, in order, not atomically, so applying the policy before the
+/// index Pod exists at all closes the window where a scheduled,
+/// already-running `index-worker` container could make an outbound
+/// connection before its policy is admitted. This narrows the race, it
+/// does not provably eliminate it -- Kubernetes has no generic, portable
+/// way to block on "this NetworkPolicy is now enforced by the CNI," only
+/// on the API object existing. In practice, on this cluster, the gap left
+/// is the time between two sequential `kubectl apply` API calls (single-
+/// digit milliseconds), dwarfed by how long a container takes to actually
+/// start; `index-worker`'s own container hasn't been created, let alone
+/// started a socket, by the time its NetworkPolicy document is admitted.
+///
+/// **Node-IP traffic, not just external egress, was checked, not
+/// assumed**: standard Kubernetes `NetworkPolicy` documentation notes
+/// that egress rules do not universally cover Pod-to-node-IP traffic on
+/// every CNI. Tested by hand against this cluster's actual CNI (OVN-
+/// Kubernetes) with a throwaway Pod carrying the identical `egress: []`
+/// policy: connections to the node's own `InternalIP` on both port 10250
+/// (kubelet) and port 22 (sshd) timed out identically to the external-
+/// address control probe, not a fast refusal -- consistent with the same
+/// enforcement, not an exemption. This is a property of OVN-Kubernetes
+/// specifically, not a portable guarantee of `NetworkPolicy` in general;
+/// re-verify if this orchestrator ever targets a cluster with a
+/// different CNI.
 ///
 /// Extracted as its own pure function, mirroring
 /// [`crate::tenant_pod::repo_mount_arg`], so a test can assert on the
 /// generated YAML without a real cluster to apply it against.
-fn tenant_manifest(namespace: &str, image: &str, tenant_slug: &str) -> String {
+fn tenant_manifest(namespace: &str, shared_pvc: &str, image: &str, tenant_slug: &str) -> String {
+    let mount_path = format!("/srv/wkp-hub/repos/{tenant_slug}");
     format!(
-        r#"apiVersion: v1
-kind: PersistentVolumeClaim
+        r#"apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: repo-{tenant_slug}
+  name: {deny_egress}
   namespace: {namespace}
-  labels:
-    app.kubernetes.io/part-of: paperless-ink-tenant
 spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 1Gi
+  podSelector:
+    matchLabels: {{ app: {index_pod} }}
+  policyTypes: ["Egress"]
+  egress: []
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: wkp-tenant-{tenant_slug}
+  name: {serve_pod}
   namespace: {namespace}
   labels:
-    app: wkp-tenant-{tenant_slug}
+    app: {serve_pod}
+    tenant: {tenant_slug}
 spec:
+  initContainers:
+    - name: init-tenant-dir
+      image: {image}
+      command: ["mkdir", "-p", "/mnt/shared-repos/{tenant_slug}"]
+      volumeMounts:
+        - name: shared-repos
+          mountPath: /mnt/shared-repos
   containers:
     - name: serve
       image: {image}
@@ -302,23 +437,43 @@ spec:
       ports:
         - containerPort: {SERVE_PORT}
       volumeMounts:
-        - name: repo
-          mountPath: /srv/wkp-hub/repos/{tenant_slug}
+        - name: shared-repos
+          mountPath: {mount_path}
+          subPath: {tenant_slug}
+  volumes:
+    - name: shared-repos
+      persistentVolumeClaim:
+        claimName: {shared_pvc}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {index_pod}
+  namespace: {namespace}
+  labels:
+    app: {index_pod}
+    tenant: {tenant_slug}
+spec:
+  initContainers:
+    - name: init-tenant-dir
+      image: {image}
+      command: ["mkdir", "-p", "/mnt/shared-repos/{tenant_slug}"]
+      volumeMounts:
+        - name: shared-repos
+          mountPath: /mnt/shared-repos
+  containers:
     - name: index-worker
       image: {image}
       command: ["/usr/local/bin/wkp-hub"]
       args: ["index-worker", "--tenant", "{tenant_slug}"]
-      securityContext:
-        seccompProfile:
-          type: Localhost
-          localhostProfile: wkp-hub-seccomp-no-network.json
       volumeMounts:
-        - name: repo
-          mountPath: /srv/wkp-hub/repos/{tenant_slug}
+        - name: shared-repos
+          mountPath: {mount_path}
+          subPath: {tenant_slug}
   volumes:
-    - name: repo
+    - name: shared-repos
       persistentVolumeClaim:
-        claimName: repo-{tenant_slug}
+        claimName: {shared_pvc}
 ---
 apiVersion: v1
 kind: Service
@@ -327,11 +482,14 @@ metadata:
   namespace: {namespace}
 spec:
   selector:
-    app: wkp-tenant-{tenant_slug}
+    app: {serve_pod}
   ports:
     - port: {SERVE_PORT}
       targetPort: {SERVE_PORT}
-"#
+"#,
+        serve_pod = serve_pod_name(tenant_slug),
+        index_pod = index_pod_name(tenant_slug),
+        deny_egress = index_deny_egress_name(tenant_slug),
     )
 }
 
@@ -341,52 +499,166 @@ mod tests {
 
     #[test]
     fn tenant_manifest_names_every_object_from_the_slug_consistently() {
-        let manifest = tenant_manifest("paperless-ink", "localhost/wkp-hub:test", "acme");
-        assert!(manifest.contains("name: repo-acme"));
-        assert!(manifest.contains("name: wkp-tenant-acme"));
+        let manifest = tenant_manifest(
+            "paperless-ink",
+            "tenant-repos-shared",
+            "localhost/wkp-hub:test",
+            "acme",
+        );
+        assert!(manifest.contains("name: wkp-tenant-acme-serve"));
+        assert!(manifest.contains("name: wkp-tenant-acme-index"));
+        assert!(manifest.contains("name: wkp-tenant-acme-index-deny-egress"));
         assert!(manifest.contains("name: acme\n")); // the Service itself
         assert!(manifest.contains("namespace: paperless-ink"));
         assert!(manifest.contains("image: localhost/wkp-hub:test"));
     }
 
     #[test]
-    fn tenant_manifest_is_a_bare_pod_not_a_deployment() {
+    fn tenant_manifest_is_two_bare_pods_not_deployments() {
         // See the module doc comment: a Deployment's controller would
         // fight `stop_pod`'s deletion, silently defeating idle-reap.
-        let manifest = tenant_manifest("paperless-ink", "img", "acme");
-        assert!(manifest.contains("kind: Pod"));
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        assert_eq!(
+            manifest.matches("kind: Pod").count(),
+            2,
+            "expected exactly two Pod objects"
+        );
         assert!(!manifest.contains("kind: Deployment"));
     }
 
     #[test]
-    fn tenant_manifest_gives_index_worker_the_seccomp_profile_not_the_serve_container() {
-        let manifest = tenant_manifest("paperless-ink", "img", "acme");
-        let index_worker_section = manifest
-            .split("name: index-worker")
+    fn tenant_manifest_puts_serve_and_index_in_separate_pods() {
+        // 2026-09-21 correction: Kubernetes has no per-container
+        // network-namespace opt-out, so index-worker's "no network"
+        // property can only come from a NetworkPolicy scoped to its own
+        // Pod -- which requires it to actually be its own Pod, not a
+        // second container sharing the serve Pod's network namespace.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        let serve_pod = manifest
+            .split("name: wkp-tenant-acme-serve\n")
             .nth(1)
-            .expect("index-worker container must be present");
-        assert!(index_worker_section.contains("wkp-hub-seccomp-no-network.json"));
-        let serve_section = manifest
-            .split("name: serve\n")
-            .nth(1)
-            .expect("serve container must be present")
-            .split("name: index-worker")
+            .expect("serve Pod must be present")
+            .split("---")
             .next()
-            .expect("serve section ends before index-worker starts");
-        assert!(!serve_section.contains("seccompProfile"));
+            .unwrap();
+        assert!(serve_pod.contains("name: serve"));
+        assert!(!serve_pod.contains("name: index-worker"));
+
+        let index_pod = manifest
+            .split("name: wkp-tenant-acme-index\n")
+            .nth(1)
+            .expect("index Pod must be present")
+            .split("---")
+            .next()
+            .unwrap();
+        assert!(index_pod.contains("name: index-worker"));
+        assert!(!index_pod.contains("name: serve\n"));
     }
 
     #[test]
-    fn tenant_manifest_valid_yaml_with_three_documents() {
+    fn tenant_manifest_denies_all_egress_from_the_index_pod_only() {
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        assert!(manifest.contains("kind: NetworkPolicy"));
+        let policy = manifest
+            .split("kind: NetworkPolicy")
+            .nth(1)
+            .expect("NetworkPolicy must be present")
+            .split("---")
+            .next()
+            .unwrap();
+        assert!(
+            policy.contains("app: wkp-tenant-acme-index"),
+            "must select the index Pod"
+        );
+        assert!(
+            !policy.contains("app: wkp-tenant-acme-serve"),
+            "must not select the serve Pod"
+        );
+        assert!(policy.contains(r#"policyTypes: ["Egress"]"#));
+        assert!(
+            policy.contains("egress: []"),
+            "must deny all egress, not just some rules"
+        );
+    }
+
+    #[test]
+    fn tenant_manifest_uses_the_shared_pvc_with_a_per_tenant_subpath_not_a_fresh_pvc() {
+        // 2026-09-21 correction: no `kind: PersistentVolumeClaim` at all
+        // any more -- both Pods reference the one namespace-wide shared
+        // PVC by name, isolated from every other tenant only by subPath.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        assert!(!manifest.contains("kind: PersistentVolumeClaim"));
+        assert_eq!(
+            manifest.matches("claimName: tenant-repos-shared").count(),
+            2,
+            "both Pods must reference the shared PVC by name"
+        );
+        assert_eq!(
+            manifest.matches("subPath: acme").count(),
+            2,
+            "both Pods' main containers must scope their mount to this tenant's own subPath"
+        );
+    }
+
+    #[test]
+    fn tenant_manifest_creates_the_subpath_directory_before_mounting_it() {
+        // subPath targets aren't guaranteed to be auto-created for every
+        // volume plugin/Kubernetes version -- each Pod's init container
+        // must mkdir -p it first, against the *unscoped* mount.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        assert_eq!(
+            manifest
+                .matches(r#"command: ["mkdir", "-p", "/mnt/shared-repos/acme"]"#)
+                .count(),
+            2,
+            "both Pods need an init container creating the tenant subdirectory"
+        );
+    }
+
+    #[test]
+    fn tenant_manifest_valid_yaml_with_four_documents() {
         // Cheap structural check without a real cluster to apply
-        // against -- three `---`-separated documents (PVC, Pod,
-        // Service), each independently well-formed YAML.
-        let manifest = tenant_manifest("paperless-ink", "img", "acme");
+        // against -- four `---`-separated documents (NetworkPolicy,
+        // serve Pod, index Pod, Service), each independently well-formed.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
         let docs: Vec<&str> = manifest.split("---").collect();
-        assert_eq!(docs.len(), 3, "expected PVC, Pod, and Service documents");
+        assert_eq!(
+            docs.len(),
+            4,
+            "expected NetworkPolicy, serve Pod, index Pod, and Service documents"
+        );
         for doc in docs {
             serde_yaml_value(doc);
         }
+    }
+
+    #[test]
+    fn tenant_manifest_applies_the_networkpolicy_before_either_pod() {
+        // `kubectl apply -f -` issues one API call per document, in
+        // order, not atomically -- the NetworkPolicy must be admitted
+        // before the index Pod can possibly exist, closing the window
+        // where an already-scheduled index-worker container could open
+        // a connection before its egress-deny policy applies. See
+        // tenant_manifest's own doc comment for why this narrows, but
+        // doesn't provably eliminate, the race.
+        let manifest = tenant_manifest("paperless-ink", "tenant-repos-shared", "img", "acme");
+        let policy_pos = manifest
+            .find("kind: NetworkPolicy")
+            .expect("NetworkPolicy must be present");
+        let serve_pos = manifest
+            .find("name: wkp-tenant-acme-serve")
+            .expect("serve Pod must be present");
+        let index_pos = manifest
+            .find("name: wkp-tenant-acme-index\n")
+            .expect("index Pod must be present");
+        assert!(
+            policy_pos < serve_pos,
+            "NetworkPolicy must precede the serve Pod"
+        );
+        assert!(
+            policy_pos < index_pos,
+            "NetworkPolicy must precede the index Pod"
+        );
     }
 
     /// A tiny hand-rolled structural check, not a real YAML parser --
