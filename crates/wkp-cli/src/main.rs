@@ -19,6 +19,7 @@ mod materialize;
 mod merge_driver;
 mod podman_sandbox;
 mod promote;
+mod prompt_hook;
 mod purge;
 mod remember;
 mod resolve_conflicts;
@@ -87,7 +88,9 @@ Commands:
   context <query>        Search plus graph-traversal context
   traverse <path>        Walk refs:/wikilink graph edges from one item
   materialize --tier N   Write tier0.md/tier1.md to .wkp/
-  hooks --framework F    Print SessionStart hook text for a harness
+  hooks --framework F    Print hook text for a harness (SessionStart,
+                         UserPromptSubmit, PostToolUse for claude_code)
+  prompt-hook            Claude Code UserPromptSubmit plumbing (registered by `wkp hooks`)
   remember               Write an agent-authored item to inbox/
   promote <path>         Move an inbox/ item into the durable tree (human-signed)
   forget                 Remove an item / rotate encryption recipients
@@ -169,11 +172,22 @@ Walks refs:/[[wikilink]] edges outward from one specific file, no
 search query involved. --depth defaults to 2.";
 
 const HELP_MATERIALIZE: &str = "\
-Usage: wkp materialize --tier N [--path DIR]
+Usage: wkp materialize --tier N [--routing-table] [--path DIR]
 
 Writes .wkp/tierN.md atomically (temp file + rename). --tier is
 required -- no default, so a session-start hook never materializes
-\"whatever tier\" by accident.";
+\"whatever tier\" by accident. --routing-table (--tier 0 only) splices
+in a topic-to-path directory of every tier-1 item's title and path.";
+
+const HELP_PROMPT_HOOK: &str = "\
+Usage: wkp prompt-hook
+
+Claude Code UserPromptSubmit hook plumbing (registered by `wkp hooks
+--framework claude_code`). Reads the hook's JSON payload from stdin,
+searches the store for its `prompt` field, and prints candidate paths
+when a hit clears WKP_PROMPT_HOOK_MIN_SCORE (default 0.01). Always
+exits 0 and never writes a file -- see AGENTS.md's \"Automatic
+prompt-time discovery\".";
 
 const HELP_INDEX: &str = "\
 Usage: wkp index [PATH] [--embed-url URL] [--embed-model NAME] [--embed-key-file PATH]
@@ -262,7 +276,9 @@ const HELP_HOOKS: &str = "\
 Usage: wkp hooks --framework <name>
 
 Prints text for a harness to apply -- never writes a file itself.
-Frameworks: claude_code, codex, opencode, hermes, agents_md.";
+Frameworks: claude_code, codex, opencode, hermes, agents_md. For
+claude_code, prints SessionStart, UserPromptSubmit, and PostToolUse
+hooks together -- see `wkp prompt-hook --help` for the second one.";
 
 /// The real body of `wkp`: every subcommand's argument parsing, dispatch,
 /// and error handling. Returns the process exit code instead of calling
@@ -692,6 +708,32 @@ fn dispatch() -> i32 {
                     eprintln!("wkp: {msg}");
                     return 1;
                 }
+            }
+        }
+        // Deliberately no `ensure_min_git_version` check, same reasoning
+        // as `hooks` just above: Claude Code's own `UserPromptSubmit`
+        // hook invokes this, not a human typing `wkp`, and it only reads
+        // `index.db` through `wkp-core` directly -- no `wkp-git` call at
+        // all, and it must stay fast (design 4.3's latency priority) and
+        // never fail the prompt it's attached to (see `prompt_hook.rs`'s
+        // own doc comment).
+        Some("prompt-hook") => {
+            let args: Vec<String> = args.collect();
+            if wants_help(&args) {
+                println!("{HELP_PROMPT_HOOK}");
+                return 0;
+            }
+            if let Some(extra) = args.into_iter().next() {
+                eprintln!("wkp: unrecognized argument: {extra}");
+                return 1;
+            }
+            let path = std::env::current_dir().expect("wkp: cannot read cwd");
+            let mut stdin_payload = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin_payload);
+            let opts = prompt_hook::prompt_hook_options_from_env(path);
+            let output = prompt_hook::run_prompt_hook(&stdin_payload, &opts);
+            if !output.is_empty() {
+                println!("{output}");
             }
         }
         // Deliberately no `ensure_min_git_version` check: git itself

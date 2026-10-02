@@ -21,6 +21,19 @@ There is no embedding model and no network call anywhere in the default path. Se
 
 Tier is computed from frontmatter, not chosen by hand: `project-state`/`instruction` → tier 0, `feedback`/`knowledge` → tier 1, everything else → tier 2. Anything under `inbox/`, or with `confidence: proposed`/`inferred`, is forced to tier 2 regardless of its `type` — agent-written or imported memory never self-promotes into tier 0/1 (see "Writing memory" below).
 
+`wkp materialize --tier 0 --routing-table` splices a compact `title — path` directory of every tier-1 item into tier 0's own output, so you can see what exists to route to before spending a search call finding out. Tier 1 only, never tier 2 — see `routing_table`'s own doc comment in `wkp-core` for why. Useful when tier 1 is sparsely populated today: it tells you honestly ("tier 1 is empty") rather than silently omitting the section.
+
+## Automatic prompt-time discovery
+
+If `wkp hooks --framework claude_code`'s printed JSON is applied, two more things happen without you calling anything:
+
+- **Before each of your turns** (`UserPromptSubmit`), `wkp prompt-hook` runs a best-effort search against the user's prompt text and, if a hit clears a score threshold, injects a short `## wkp: possibly relevant context` block naming candidate paths — read one, or run `wkp context "<topic>"` to go deeper. Silence means nothing cleared the threshold, not that nothing exists; still search by hand when you suspect there's more.
+- **After every `Write`/`Edit` of a file** (`PostToolUse`), `wkp index` re-runs automatically, so the index never drifts stale behind your own edits within a session — you should not need to run `wkp index` by hand after editing a markdown file yourself, only after changes made outside the Write/Edit tools (e.g. a raw `git` operation via Bash).
+
+If you don't see the `## wkp: possibly relevant context` block ever appear, or edits don't show up in search until the next session, the hooks aren't wired in yet — same fix as tier 0's own hook: run `wkp hooks --framework claude_code` and apply the printed JSON (it now covers all three hooks in one block).
+
+**This does not replace the rule below.** The hook is best-effort and silent on a miss (score below threshold, no index yet, a malformed payload) — treat it as a bonus signal, not a substitute for deliberately calling `wkp context` yourself.
+
 ## Core commands
 
 ### Initialize a store
@@ -86,13 +99,13 @@ wkp materialize --tier 1
 
 Writes `.wkp/tier{N}.md`, atomically (temp file + rename, never in place). This is what a harness's `SessionStart` hook reads for tier 0; you would only call this yourself to inspect tier 0/1 content directly, or after editing frontmatter and wanting materialized output to reflect it (run `wkp index` first, since materialize reads from `index.db`).
 
-### Print the SessionStart hook text
+### Print the hook text
 
 ```bash
 wkp hooks --framework claude_code
 ```
 
-Prints the exact JSON to merge into `.claude/settings.local.json`. It re-indexes quietly (best-effort — a broken index never blocks session start) and then prints `.wkp/tier0.md`, also best-effort (a store with no materialized tier 0 yet produces nothing, not an error). This command never touches git or the store; it only prints static text.
+Prints the exact JSON to merge into `.claude/settings.local.json`, covering three hooks at once for `claude_code`: `SessionStart` (re-indexes quietly, then prints `.wkp/tier0.md` — both best-effort, so a broken index or a store with no materialized tier 0 yet never blocks session start, just produces nothing), `UserPromptSubmit` (runs `wkp prompt-hook`, see "Automatic prompt-time discovery" above), and `PostToolUse` (runs `wkp index` after every `Write`/`Edit`). This command never touches git or the store; it only prints static text.
 
 ### Import existing harness memory
 
@@ -144,7 +157,9 @@ wkp context "topic" --tier 2 --budget 8000
 
 ## When to call wkp
 
-Call `wkp search` or `wkp context` when:
+**Before writing anything substantive on a topic — a plan, a design note, code touching an area you haven't worked in this session — run `wkp context "<topic>"` first and read what it returns.** This is the one rule in this file worth following even when nothing prompts you to: writing on top of context you don't have is how the same decision gets re-litigated or the same bug gets re-introduced. The `UserPromptSubmit` hook (see above) covers some of this automatically for Claude Code, but it's best-effort and silent on a miss — this rule is the deliberate fallback, and the only option at all for harnesses with no such hook.
+
+Also call `wkp search` or `wkp context` when:
 - The user asks about a topic you don't have enough context on.
 - You need to find which files cover a subject before reading them.
 - You want to discover related files via explicit references (`wkp traverse`).

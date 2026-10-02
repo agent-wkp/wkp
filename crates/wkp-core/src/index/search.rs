@@ -76,11 +76,36 @@ pub struct SearchHit {
 /// still hand an arbitrary string to -- stripping it here keeps the same
 /// "never fail on adversarial input" invariant this function exists for.
 fn sanitize_fts_query(raw: &str) -> String {
+    sanitize_fts_query_joined(raw, " ")
+}
+
+/// Shared by [`sanitize_fts_query`] (implicit `AND` between words, via a
+/// plain `" "` joiner) and [`sanitize_fts_query_any`] (explicit `" OR "`),
+/// so the escaping/prefix-matching rules in the doc comment above can
+/// never drift between the two query modes.
+fn sanitize_fts_query_joined(raw: &str, joiner: &str) -> String {
     raw.replace('\0', "")
         .split_whitespace()
         .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(joiner)
+}
+
+/// Same escaping/prefix rules as [`sanitize_fts_query`], but joins words
+/// with FTS5's explicit `OR` instead of the implicit `AND` adjacent
+/// phrases otherwise get. `search`'s `AND` semantics are the right
+/// default for a short, deliberate query (`wkp search "topic"`) where
+/// requiring every word is exactly what a user typing that query means --
+/// but it is the wrong default for a long, free-form string handed to
+/// [`search_any_term`] wholesale (its own motivating case: the `wkp
+/// prompt-hook` `UserPromptSubmit` hook feeds an entire chat message
+/// through as the query, and most of its words were never going to
+/// appear verbatim in any one stored item). `OR` plus BM25's own
+/// term-frequency ranking still surfaces the best-overlapping item
+/// first; it just doesn't require a *complete* word-for-word match to
+/// return anything at all.
+fn sanitize_fts_query_any(raw: &str) -> String {
+    sanitize_fts_query_joined(raw, " OR ")
 }
 
 /// Runs a BM25 full-text query against the `items` table, applying the
@@ -92,7 +117,30 @@ pub fn search(
     query: &str,
     filter: &SearchFilter,
 ) -> Result<Vec<SearchHit>, IndexError> {
-    let sanitized = sanitize_fts_query(query);
+    run_bm25_query(conn, &sanitize_fts_query(query), filter)
+}
+
+/// Same as [`search`], except every word in `query` only needs to match
+/// *somewhere* across the result, not all of them in the same item --
+/// see [`sanitize_fts_query_any`]'s doc comment for why this exists and
+/// when to prefer it over `search`.
+pub fn search_any_term(
+    conn: &Connection,
+    query: &str,
+    filter: &SearchFilter,
+) -> Result<Vec<SearchHit>, IndexError> {
+    run_bm25_query(conn, &sanitize_fts_query_any(query), filter)
+}
+
+/// Shared tail end of [`search`]/[`search_any_term`]: takes an
+/// already-sanitized FTS5 query expression (the only difference between
+/// the two) and runs it with the same tier/metadata filters and budget
+/// truncation.
+fn run_bm25_query(
+    conn: &Connection,
+    sanitized: &str,
+    filter: &SearchFilter,
+) -> Result<Vec<SearchHit>, IndexError> {
     // An empty or whitespace-only query has no terms to match against --
     // binding `""` to `MATCH` is itself invalid FTS5 syntax (`fts5: syntax
     // error near ""`), so short-circuit to "no results" rather than
@@ -107,7 +155,7 @@ pub fn search(
         "SELECT path, title, -bm25(items, {w_path}, {w_title}, {w_content}, {w_tags}) AS score, \
          tier, tokens_estimate FROM items WHERE items MATCH ?"
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(sanitized)];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(sanitized.to_string())];
 
     if let Some(v) = &filter.item_type {
         sql.push_str(" AND item_type = ?");
@@ -322,6 +370,39 @@ pub fn materialize(conn: &Connection, tier: u8) -> Result<String, IndexError> {
     ))
 }
 
+/// A compact `- Title — path` directory of every item at exactly `tier`,
+/// titles and paths only, no body content -- for `wkp materialize --tier
+/// 0 --routing-table` (design discovery-improvements pass, feedback
+/// item 3: "generate Tier 0 as a topic-to-path routing table"). Meant to
+/// be spliced into tier 0's own output so a harness that has not yet run
+/// a single `wkp search`/`context` call still sees *what exists* to
+/// route to, cheaply, before spending a call finding out.
+///
+/// Deliberately takes an explicit `tier` rather than always meaning
+/// "tier 1": calling it with `1` (what `wkp materialize --routing-table`
+/// actually does today) is what keeps this from becoming a second way to
+/// leak unreviewed content into tier 0 -- the same `compute_tier`
+/// `inbox/` exclusion [`materialize`]'s own doc comment relies on
+/// already guarantees a tier-1 item was promoted via a human-signed
+/// commit (design 7.4/M2-6), so routing to it carries the same assurance
+/// tier 0's own content does. Passing `2` would defeat that guarantee
+/// (tier 2 is unreviewed, agent-written and `inbox/` content included) --
+/// nothing stops a future caller from doing that, so this is a
+/// documented caution, not an enforced one.
+pub fn routing_table(conn: &Connection, tier: u8) -> Result<String, IndexError> {
+    let mut stmt = conn.prepare("SELECT path, title FROM items WHERE tier = ?1 ORDER BY path")?;
+    let rows = stmt.query_map([tier], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut body = String::new();
+    for row in rows {
+        let (path, title) = row?;
+        body.push_str(&format!("- {title} — {path}\n"));
+    }
+    Ok(body)
+}
+
 /// Used only by [`super::hybrid::hybrid_search`], which needs a fused
 /// path's title/tier/tokens when its score came entirely from the vector
 /// side (never matched BM25 at all, so `search`'s own result set never
@@ -365,6 +446,64 @@ mod tests {
         let hits = search(&conn, "rust", &SearchFilter::default()).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "a.md");
+    }
+
+    #[test]
+    fn search_any_term_matches_on_partial_overlap_where_plain_search_requires_all_words() {
+        let items = vec![item(
+            "a.md",
+            "Rust static binary",
+            "wkp is a single static Rust binary",
+        )];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        // A realistic `UserPromptSubmit` case: a whole sentence, only one
+        // word of which ("rust") actually appears in the corpus.
+        let query = "completely unrelated filler words about rust";
+
+        // Plain `search` requires every word to match (implicit AND) --
+        // none of "completely"/"unrelated"/"filler"/"words"/"about" are
+        // in the corpus, so it finds nothing even though "rust" alone
+        // would hit.
+        assert_eq!(
+            search(&conn, query, &SearchFilter::default())
+                .expect("search")
+                .len(),
+            0
+        );
+
+        let hits =
+            search_any_term(&conn, query, &SearchFilter::default()).expect("search_any_term");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "a.md");
+    }
+
+    #[test]
+    fn search_any_term_on_an_empty_query_returns_no_results() {
+        let items = vec![item("a.md", "A Title", "some content")];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        let hits = search_any_term(&conn, "   ", &SearchFilter::default())
+            .expect("search_any_term on blank query");
+        assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn routing_table_lists_only_the_requested_tier_as_title_em_dash_path() {
+        let mut tier1 = item("k.md", "Decision", "search is BM25 by default");
+        tier1.frontmatter.item_type = Some(ItemType::Knowledge);
+        let mut tier2 = item("other.md", "Unrelated", "not routing-critical");
+        tier2.frontmatter.item_type = Some(ItemType::Reference);
+
+        let conn = build_in_memory(&[tier1, tier2]).expect("build in-memory index");
+        let table = routing_table(&conn, 1).expect("routing_table");
+        assert_eq!(table, "- Decision — k.md\n");
+    }
+
+    #[test]
+    fn routing_table_is_empty_when_no_items_at_that_tier() {
+        let items = vec![item("other.md", "Unrelated", "not routing-critical")];
+        let conn = build_in_memory(&items).expect("build in-memory index");
+        let table = routing_table(&conn, 1).expect("routing_table");
+        assert_eq!(table, "");
     }
 
     #[test]
