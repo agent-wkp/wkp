@@ -234,9 +234,14 @@ search (`wkp-core`'s `search_any_term`, not plain `search`'s
 implicit-AND — a whole prompt needs partial-overlap matching, not a
 literal match on every word) against its `prompt` field, and prints up
 to 5 candidate paths when the top hits clear `WKP_PROMPT_HOOK_MIN_SCORE`
-(default `0.01`, an unrebuttable-from-first-principles heuristic — BM25
-scores are corpus-dependent and unbounded, so tune this once a real
-golden-query set makes a better number knowable). Always exits 0 and
+(default `0.0` — any real match; BM25 scores are corpus-dependent and
+unbounded by orders of magnitude, so a fixed positive cutoff reliably
+swallows real hits in a small store — tune this up once a real
+golden-query set makes a better number knowable). Also reads
+`CLAUDE_PROJECT_DIR` (set by Claude Code for every hook invocation) in
+preference to its own working directory, so it finds the project-root
+index even when the triggering tool call touched a subdirectory.
+Always exits 0 and
 writes nothing — a missing index, a malformed payload, or nothing
 clearing the threshold all mean "print nothing," never a visible
 failure.

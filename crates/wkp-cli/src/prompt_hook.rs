@@ -24,16 +24,44 @@ pub(crate) struct PromptHookOptions {
 const DEFAULT_LIMIT: usize = 5;
 
 /// BM25 scores (`-bm25(...)`, see `wkp-core`'s `search`) are unbounded
-/// and corpus-dependent, not a normalized 0..1 range -- this default is
-/// a starting heuristic picked without a real corpus to calibrate
-/// against, not a measured value. `WKP_PROMPT_HOOK_MIN_SCORE` overrides
-/// it; the right way to pick a better number is the golden-query/
-/// recall@5 harness flagged as follow-up work in the same
-/// discovery-improvements pass this command landed in (see
-/// AGENTS.md).
-const DEFAULT_MIN_SCORE: f64 = 0.01;
+/// and corpus-dependent, not a normalized 0..1 range, and vary by
+/// *orders of magnitude* with corpus size: measured by hand against two
+/// real indexes built for this purpose, the same genuinely relevant
+/// one-word overlap scored `~0.0000016` in a 1-item store and `~1.7` in
+/// a 5-item one. A fixed positive cutoff picked to feel reasonable
+/// (`0.01`, this constant's first value) silently swallowed the
+/// 1-item-store case entirely -- caught on review (CodeRabbit), not by
+/// the test suite, because the one test exercising a real hit passed
+/// `min_score: 0.0` directly rather than going through this default
+/// (see `run_prompt_hook_through_the_real_default_min_score` below,
+/// added to close that gap). `0.0` -- "accept any match that isn't
+/// actively anti-correlated," rather than a tuned positive number with
+/// no principled basis -- is deliberately the most permissive value
+/// that still means anything: `search_any_term` only returns rows that
+/// already satisfied FTS5's `MATCH` (at least one real word overlap),
+/// so this isn't "accept everything," and `DEFAULT_LIMIT` plus
+/// best-match-first ordering still bound how much ever gets injected.
+/// `WKP_PROMPT_HOOK_MIN_SCORE` overrides it for a corpus where this
+/// does prove too permissive; the principled way to pick a better
+/// number either way is the golden-query/recall@5 harness flagged as
+/// follow-up work in the same discovery-improvements pass this command
+/// landed in (see AGENTS.md).
+const DEFAULT_MIN_SCORE: f64 = 0.0;
 
-pub(crate) fn prompt_hook_options_from_env(path: PathBuf) -> PromptHookOptions {
+/// `default_path` is the fallback -- used as-is when `CLAUDE_PROJECT_DIR`
+/// isn't set (e.g. `wkp prompt-hook` run by hand for testing, rather
+/// than by Claude Code's own hook runner). When it *is* set, it wins:
+/// Claude Code sets it for every hook invocation specifically so a hook
+/// command behaves the same regardless of which subdirectory the tool
+/// call that triggered it happened to touch, and the caller's own
+/// `current_dir()` is exactly that subdirectory, not the project root
+/// (caught on review, CodeRabbit -- without this, the hook opens
+/// `<subdirectory>/.wkp/index.db`, not the real project-root one, and
+/// silently finds nothing there).
+pub(crate) fn prompt_hook_options_from_env(default_path: PathBuf) -> PromptHookOptions {
+    let path = std::env::var_os("CLAUDE_PROJECT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(default_path);
     let min_score = std::env::var("WKP_PROMPT_HOOK_MIN_SCORE")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
@@ -86,42 +114,80 @@ pub(crate) fn run_prompt_hook(stdin_payload: &str, opts: &PromptHookOptions) -> 
 
 /// Finds the string value of a top-level `"field":"..."` entry in
 /// `input`, decoding JSON string escapes. Hand-rolled rather than
-/// pulling in `serde_json` for one field -- same slim-core reasoning as
+/// pulling in `serde_json` (not an existing dependency of this crate --
+/// nothing in `wkp-cli`/`wkp-core` parses JSON via a real parser
+/// anywhere today) for one field -- same slim-core reasoning as
 /// `search::parse_search_args`'s own doc comment on not adding `clap`
-/// yet. Correctly skips over *every* string literal it scans past, not
-/// just the one it is looking for, via [`read_json_string`] -- so a
-/// value elsewhere in the payload that happens to contain the literal
-/// text `"field"` (plausible here: `prompt` is arbitrary user text, and
-/// could itself contain the substring `"prompt"`) can never be mistaken
-/// for the real key. A match requires the string to actually be
-/// positioned as a JSON string *token*, immediately followed by `:`.
+/// yet.
+///
+/// Tracks `{}`/`[]` nesting depth (correctly skipping over the
+/// *contents* of every string literal it scans past while doing so, via
+/// [`read_json_string`] -- a string value containing a literal `{` or
+/// `"field"` substring can never be mistaken for real structure or the
+/// real key). Two real gaps the first version of this function had,
+/// caught on review (CodeRabbit) and fixed here: it matched `"field":`
+/// at *any* nesting depth, so a same-named key nested inside some other
+/// top-level value's object/array could shadow the real top-level one;
+/// and it never required the input to be a complete, balanced object,
+/// so truncated input like `{"field":"x"` (no closing `}`) returned `x`
+/// instead of `None`. Both are now rejected: a key only counts while
+/// depth is exactly 1 (inside the outermost object, nothing deeper), and
+/// the full input must leave depth back at 0 by the end -- an unbalanced
+/// or non-object input returns `None` regardless of what field matches
+/// were seen along the way.
 pub(crate) fn extract_json_string_field(input: &str, field: &str) -> Option<String> {
     let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'"' {
-            i += 1;
-            continue;
-        }
-        let (value, end) = read_json_string(input, i)?;
-        let mut j = end;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if value == field && bytes.get(j) == Some(&b':') {
-            j += 1;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            return if bytes.get(j) == Some(&b'"') {
-                read_json_string(input, j).map(|(v, _)| v)
-            } else {
-                None
-            };
-        }
-        i = end;
+    let start = input.find(|c: char| !c.is_whitespace())?;
+    if bytes.get(start) != Some(&b'{') {
+        return None;
     }
-    None
+    let mut depth: i32 = 0;
+    let mut found: Option<String> = None;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let (value, end) = read_json_string(input, i)?;
+                let mut j = end;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if depth == 1 && bytes.get(j) == Some(&b':') && value == field {
+                    let mut k = j + 1;
+                    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                        k += 1;
+                    }
+                    if bytes.get(k) != Some(&b'"') {
+                        // The field is present at the top level but its
+                        // value isn't a string -- same "give up" rule
+                        // the original version applied.
+                        return None;
+                    }
+                    let (val, val_end) = read_json_string(input, k)?;
+                    found = Some(val);
+                    i = val_end;
+                    continue;
+                }
+                i = end;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    found
 }
 
 /// Decodes one JSON string literal in `s` starting at byte offset
@@ -237,6 +303,44 @@ mod tests {
         );
     }
 
+    /// Regression test (CodeRabbit): a *complete* string value followed
+    /// by a missing closing `}` must still be rejected as malformed --
+    /// the earlier version of this function had no concept of overall
+    /// object balance, so it happily returned `"rust"` for this
+    /// truncated payload instead of `None`.
+    #[test]
+    fn extract_json_string_field_rejects_a_value_missing_its_closing_brace() {
+        assert_eq!(
+            extract_json_string_field(r#"{"prompt":"rust""#, "prompt"),
+            None
+        );
+    }
+
+    /// Regression test (CodeRabbit): a `prompt` key nested inside some
+    /// other top-level value's object must never shadow the real
+    /// top-level `prompt` key -- the earlier version matched `"field":`
+    /// at any nesting depth, so whichever one appeared first in the
+    /// byte stream won regardless of depth.
+    #[test]
+    fn extract_json_string_field_ignores_a_same_named_key_nested_inside_another_value() {
+        let payload =
+            r#"{"other":{"prompt":"nested, should be ignored"},"prompt":"real top-level value"}"#;
+        assert_eq!(
+            extract_json_string_field(payload, "prompt").as_deref(),
+            Some("real top-level value")
+        );
+    }
+
+    #[test]
+    fn extract_json_string_field_rejects_input_that_is_not_a_json_object() {
+        assert_eq!(
+            extract_json_string_field(r#""just a string""#, "prompt"),
+            None
+        );
+        assert_eq!(extract_json_string_field("", "prompt"), None);
+        assert_eq!(extract_json_string_field("   ", "prompt"), None);
+    }
+
     #[test]
     fn run_prompt_hook_returns_empty_when_prompt_field_missing() {
         let temp = temp_dir("prompt-hook-missing-field");
@@ -304,5 +408,44 @@ mod tests {
         };
         let payload = r#"{"prompt":"how do I configure guardrails for this project"}"#;
         assert_eq!(run_prompt_hook(payload, &opts), "");
+    }
+
+    /// Regression test (CodeRabbit): every other test above builds
+    /// `PromptHookOptions` by hand with an explicit `min_score`,
+    /// `run_prompt_hook_finds_and_formats_a_relevant_hit` included --
+    /// none of them ever exercised the *real* default
+    /// (`prompt_hook_options_from_env`'s `DEFAULT_MIN_SCORE`) against a
+    /// real hit, which is exactly how the first value of that constant
+    /// (`0.01`) shipped able to silently swallow a genuinely relevant
+    /// hit in a small store without any test catching it.
+    #[test]
+    fn run_prompt_hook_through_the_real_default_min_score_still_finds_a_hit_in_a_small_store() {
+        let temp = temp_dir("prompt-hook-real-default");
+        let dir = temp.path();
+        crate::test_support::test_init(dir).expect("run_init");
+        std::fs::write(
+            dir.join("a.md"),
+            "---\ntitle: Guardrails config\ntype: knowledge\n---\n\nNeMo guardrails setup notes\n",
+        )
+        .expect("write a.md");
+        wkp_git::commit_all(dir, "seed").expect("commit_all");
+        crate::index_cmd::run_index(dir).expect("run_index");
+
+        // No env var override -- the real shipped default. Also clears
+        // CLAUDE_PROJECT_DIR so this test's outcome depends only on
+        // `dir` (the path it actually built an index under) and not on
+        // whatever this process's ambient environment happens to carry
+        // (e.g. if `cargo test` itself were ever run from inside a real
+        // Claude Code hook's own environment, which does set it).
+        std::env::remove_var("WKP_PROMPT_HOOK_MIN_SCORE");
+        std::env::remove_var("CLAUDE_PROJECT_DIR");
+        let opts = prompt_hook_options_from_env(dir.to_path_buf());
+        let payload = r#"{"prompt":"how do I configure guardrails for this project"}"#;
+        let output = run_prompt_hook(payload, &opts);
+        assert!(
+            output.contains("Guardrails config"),
+            "default min_score ({}) swallowed a real hit, got: {output}",
+            opts.min_score
+        );
     }
 }

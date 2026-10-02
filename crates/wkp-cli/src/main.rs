@@ -185,7 +185,8 @@ Usage: wkp prompt-hook
 Claude Code UserPromptSubmit hook plumbing (registered by `wkp hooks
 --framework claude_code`). Reads the hook's JSON payload from stdin,
 searches the store for its `prompt` field, and prints candidate paths
-when a hit clears WKP_PROMPT_HOOK_MIN_SCORE (default 0.01). Always
+when a hit clears WKP_PROMPT_HOOK_MIN_SCORE (default 0.0: any real
+match). Always
 exits 0 and never writes a file -- see AGENTS.md's \"Automatic
 prompt-time discovery\".";
 

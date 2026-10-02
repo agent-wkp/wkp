@@ -91,6 +91,20 @@ pub(crate) fn render_hooks(framework: &str) -> Result<String, String> {
     }
 }
 
+/// Every embedded `wkp index`/`cat .wkp/...` command below is anchored
+/// to `$CLAUDE_PROJECT_DIR`, not the hook's own working directory.
+/// Claude Code sets this env var for every hook invocation specifically
+/// so a hook command behaves the same regardless of which subdirectory
+/// the tool call that triggered it happened to touch -- without it, a
+/// `PostToolUse` edit inside a subdirectory would build or read a
+/// second, nested `.wkp/index.db` instead of the real project-root one
+/// (caught on review, CodeRabbit; applied to `SessionStart` here too,
+/// not just the new `PostToolUse` hook, since it has the identical
+/// shape of bug and shipping the fix on only one of the two would be
+/// worse than shipping it on neither). `UserPromptSubmit`'s own command
+/// needs no such change here -- `wkp prompt-hook` resolves
+/// `CLAUDE_PROJECT_DIR` itself in Rust (see `main.rs`'s dispatch arm),
+/// since it has no path argument to pass one through as.
 const CLAUDE_CODE_HOOK: &str = r#"{
   "hooks": {
     "SessionStart": [
@@ -98,7 +112,7 @@ const CLAUDE_CODE_HOOK: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "wkp index >/dev/null 2>&1 || true; cat .wkp/tier0.md 2>/dev/null || true"
+            "command": "wkp index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1 || true; cat \"$CLAUDE_PROJECT_DIR/.wkp/tier0.md\" 2>/dev/null || true"
           }
         ]
       }
@@ -119,7 +133,7 @@ const CLAUDE_CODE_HOOK: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "wkp index >/dev/null 2>&1 || true"
+            "command": "wkp index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1 || true"
           }
         ]
       }
@@ -159,6 +173,10 @@ mod tests {
         assert!(output.contains("wkp prompt-hook"));
         assert!(output.contains("PostToolUse"));
         assert!(output.contains(r#""matcher": "Write|Edit""#));
+        // CLAUDE_PROJECT_DIR anchoring (CodeRabbit): both wkp-index
+        // invocations, and tier0.md's own read, must use it rather than
+        // the hook's own working directory.
+        assert_eq!(output.matches("$CLAUDE_PROJECT_DIR").count(), 3);
     }
 
     /// `codex`/`opencode`/`hermes`/`agents_md` are four names for the
