@@ -59,11 +59,28 @@ const DEFAULT_MIN_SCORE: f64 = 0.0;
 /// `<subdirectory>/.wkp/index.db`, not the real project-root one, and
 /// silently finds nothing there).
 pub(crate) fn prompt_hook_options_from_env(default_path: PathBuf) -> PromptHookOptions {
-    let path = std::env::var_os("CLAUDE_PROJECT_DIR")
+    prompt_hook_options_with(default_path, |k| std::env::var_os(k))
+}
+
+/// Same as [`prompt_hook_options_from_env`], with the environment lookup
+/// injected rather than read directly from `std::env`. Exists so tests
+/// can exercise the real default-selection logic (`unwrap_or`, parsing,
+/// `CLAUDE_PROJECT_DIR` precedence) without mutating process-wide `std
+/// ::env` state to do it -- `cargo test` runs tests in parallel by
+/// default, and `set_var`/`remove_var` are schedule-dependent across
+/// threads regardless of which direction they mutate (caught on review,
+/// CodeRabbit: an earlier version of the test below used `remove_var`
+/// defensively, which is *safer* than `set_var` but still a real
+/// instance of the same class of hazard, not an exception to it).
+fn prompt_hook_options_with(
+    default_path: PathBuf,
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> PromptHookOptions {
+    let path = get("CLAUDE_PROJECT_DIR")
         .map(PathBuf::from)
         .unwrap_or(default_path);
-    let min_score = std::env::var("WKP_PROMPT_HOOK_MIN_SCORE")
-        .ok()
+    let min_score = get("WKP_PROMPT_HOOK_MIN_SCORE")
+        .and_then(|v| v.into_string().ok())
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MIN_SCORE);
     PromptHookOptions {
@@ -417,7 +434,13 @@ mod tests {
     /// (`prompt_hook_options_from_env`'s `DEFAULT_MIN_SCORE`) against a
     /// real hit, which is exactly how the first value of that constant
     /// (`0.01`) shipped able to silently swallow a genuinely relevant
-    /// hit in a small store without any test catching it.
+    /// hit in a small store without any test catching it. Goes through
+    /// `prompt_hook_options_with` directly with an empty lookup (`|_|
+    /// None`), not `prompt_hook_options_from_env` plus
+    /// `std::env::remove_var` -- the first version of this test did the
+    /// latter, which is process-wide mutation and schedule-dependent
+    /// under `cargo test`'s parallel-by-default runner regardless of
+    /// which direction it mutates (caught on review, CodeRabbit).
     #[test]
     fn run_prompt_hook_through_the_real_default_min_score_still_finds_a_hit_in_a_small_store() {
         let temp = temp_dir("prompt-hook-real-default");
@@ -431,15 +454,9 @@ mod tests {
         wkp_git::commit_all(dir, "seed").expect("commit_all");
         crate::index_cmd::run_index(dir).expect("run_index");
 
-        // No env var override -- the real shipped default. Also clears
-        // CLAUDE_PROJECT_DIR so this test's outcome depends only on
-        // `dir` (the path it actually built an index under) and not on
-        // whatever this process's ambient environment happens to carry
-        // (e.g. if `cargo test` itself were ever run from inside a real
-        // Claude Code hook's own environment, which does set it).
-        std::env::remove_var("WKP_PROMPT_HOOK_MIN_SCORE");
-        std::env::remove_var("CLAUDE_PROJECT_DIR");
-        let opts = prompt_hook_options_from_env(dir.to_path_buf());
+        // No env var involved at all: an empty lookup is exactly the
+        // real default path (every `unwrap_or` falls through).
+        let opts = prompt_hook_options_with(dir.to_path_buf(), |_| None);
         let payload = r#"{"prompt":"how do I configure guardrails for this project"}"#;
         let output = run_prompt_hook(payload, &opts);
         assert!(
@@ -447,5 +464,38 @@ mod tests {
             "default min_score ({}) swallowed a real hit, got: {output}",
             opts.min_score
         );
+    }
+
+    #[test]
+    fn prompt_hook_options_with_prefers_claude_project_dir_over_the_fallback_path() {
+        let opts = prompt_hook_options_with(PathBuf::from("/fallback"), |k| match k {
+            "CLAUDE_PROJECT_DIR" => Some("/real/project/root".into()),
+            _ => None,
+        });
+        assert_eq!(opts.path, PathBuf::from("/real/project/root"));
+    }
+
+    #[test]
+    fn prompt_hook_options_with_falls_back_to_the_default_path_when_unset() {
+        let opts = prompt_hook_options_with(PathBuf::from("/fallback"), |_| None);
+        assert_eq!(opts.path, PathBuf::from("/fallback"));
+    }
+
+    #[test]
+    fn prompt_hook_options_with_reads_a_numeric_min_score_override() {
+        let opts = prompt_hook_options_with(PathBuf::from("/x"), |k| match k {
+            "WKP_PROMPT_HOOK_MIN_SCORE" => Some("2.5".into()),
+            _ => None,
+        });
+        assert_eq!(opts.min_score, 2.5);
+    }
+
+    #[test]
+    fn prompt_hook_options_with_falls_back_to_default_min_score_on_an_unparseable_override() {
+        let opts = prompt_hook_options_with(PathBuf::from("/x"), |k| match k {
+            "WKP_PROMPT_HOOK_MIN_SCORE" => Some("not-a-number".into()),
+            _ => None,
+        });
+        assert_eq!(opts.min_score, DEFAULT_MIN_SCORE);
     }
 }
