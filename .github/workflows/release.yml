@@ -77,7 +77,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -129,7 +129,7 @@ jobs:
       - name: checksum
         # `sha256sum` doesn't exist on the macOS runner (a real,
         # previously-undiscovered bug: this job runs across
-        # matrix.os including macos-14, but this step was never
+        # matrix.os including macos-latest, but this step was never
         # actually exercised until the first real tag push --
         # `sha256sum: command not found`, exit 127). `shasum -a 256`
         # is the macOS-native equivalent and produces the identical
