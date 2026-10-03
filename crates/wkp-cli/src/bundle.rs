@@ -309,6 +309,7 @@ mod tests {
             crate::materialize::run_materialize(&crate::materialize::MaterializeOptions {
                 path: device_b.path().to_path_buf(),
                 tier,
+                routing_table: false,
             })
             .expect("materialize after import");
             let content =

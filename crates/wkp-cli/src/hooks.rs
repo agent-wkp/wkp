@@ -2,8 +2,15 @@
 //! (design 3.3).
 //!
 //! Two different shapes come out of here, not one: `claude_code` prints
-//! a real `SessionStart` hook JSON block (Claude Code has a dedicated
-//! hook API to plug into). Every other supported value (`codex`,
+//! a real hook JSON block covering three separate Claude Code hook
+//! events -- `SessionStart` (materializes and injects tier 0, unchanged
+//! since M1-6), `UserPromptSubmit` (runs `wkp prompt-hook`, M?-?: a
+//! best-effort BM25 search against the prompt text itself, injecting
+//! candidate paths when one clears a score threshold -- see
+//! `prompt_hook.rs`), and `PostToolUse` (re-runs `wkp index` after every
+//! `Write`/`Edit` tool call, so the index never drifts stale behind an
+//! agent's own edits between session starts). Claude Code has a
+//! dedicated hook API for all three; every other supported value (`codex`,
 //! `opencode`, `hermes`, and the generic `agents_md`) prints the same
 //! plain Markdown instruction, on the assumption that pasting it
 //! somewhere the harness reads at startup achieves the same thing:
@@ -55,10 +62,13 @@ pub(crate) fn parse_hooks_args(mut args: impl Iterator<Item = String>) -> Result
 }
 
 /// `wkp hooks --framework <name>`: prints the exact text for a harness
-/// to apply. `claude_code` gets a real `SessionStart` hook (design
-/// 3.3) -- applying it to `.claude/settings.local.json` is left to the
-/// caller; its embedded command re-indexes quietly and best-effort
-/// (`|| true`: a broken index must never block the session).
+/// to apply. `claude_code` gets a real hook JSON block covering
+/// `SessionStart`, `UserPromptSubmit`, and `PostToolUse` (design 3.3,
+/// module doc comment above has the full breakdown) -- applying it to
+/// `.claude/settings.local.json` is left to the caller; every embedded
+/// command is quiet and best-effort (`|| true`: a broken index, or a
+/// `prompt-hook` call that finds nothing, must never block or visibly
+/// fail the session).
 /// `codex`/`opencode`/`hermes`/`agents_md` all get the same instruction
 /// text instead (see module doc comment for why one text serves all
 /// four, and for the honest caveat on `hermes` specifically) -- its
@@ -81,6 +91,20 @@ pub(crate) fn render_hooks(framework: &str) -> Result<String, String> {
     }
 }
 
+/// Every embedded `wkp index`/`cat .wkp/...` command below is anchored
+/// to `$CLAUDE_PROJECT_DIR`, not the hook's own working directory.
+/// Claude Code sets this env var for every hook invocation specifically
+/// so a hook command behaves the same regardless of which subdirectory
+/// the tool call that triggered it happened to touch -- without it, a
+/// `PostToolUse` edit inside a subdirectory would build or read a
+/// second, nested `.wkp/index.db` instead of the real project-root one
+/// (caught on review, CodeRabbit; applied to `SessionStart` here too,
+/// not just the new `PostToolUse` hook, since it has the identical
+/// shape of bug and shipping the fix on only one of the two would be
+/// worse than shipping it on neither). `UserPromptSubmit`'s own command
+/// needs no such change here -- `wkp prompt-hook` resolves
+/// `CLAUDE_PROJECT_DIR` itself in Rust (see `main.rs`'s dispatch arm),
+/// since it has no path argument to pass one through as.
 const CLAUDE_CODE_HOOK: &str = r#"{
   "hooks": {
     "SessionStart": [
@@ -88,7 +112,28 @@ const CLAUDE_CODE_HOOK: &str = r#"{
         "hooks": [
           {
             "type": "command",
-            "command": "wkp index >/dev/null 2>&1 || true; cat .wkp/tier0.md 2>/dev/null || true"
+            "command": "wkp index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1 || true; cat \"$CLAUDE_PROJECT_DIR/.wkp/tier0.md\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wkp prompt-hook 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wkp index \"$CLAUDE_PROJECT_DIR\" >/dev/null 2>&1 || true"
           }
         ]
       }
@@ -105,6 +150,11 @@ const AGENTS_MD_INSTRUCTION: &str = "## WKP memory
 Before starting work, run
 `wkp index && wkp materialize --tier 0 && cat .wkp/tier0.md`
 and treat its output as already-established project context.
+
+Before writing anything substantive on a topic, also run
+`wkp context \"<topic>\"` and read what it returns -- harnesses without
+a `UserPromptSubmit`-equivalent hook have no automatic equivalent of
+this, so it has to be a deliberate habit instead.
 ";
 
 #[cfg(test)]
@@ -119,6 +169,14 @@ mod tests {
         assert!(output.contains("SessionStart"));
         assert!(output.contains("wkp index"));
         assert!(output.contains("tier0.md"));
+        assert!(output.contains("UserPromptSubmit"));
+        assert!(output.contains("wkp prompt-hook"));
+        assert!(output.contains("PostToolUse"));
+        assert!(output.contains(r#""matcher": "Write|Edit""#));
+        // CLAUDE_PROJECT_DIR anchoring (CodeRabbit): both wkp-index
+        // invocations, and tier0.md's own read, must use it rather than
+        // the hook's own working directory.
+        assert_eq!(output.matches("$CLAUDE_PROJECT_DIR").count(), 3);
     }
 
     /// `codex`/`opencode`/`hermes`/`agents_md` are four names for the
@@ -139,6 +197,7 @@ mod tests {
         assert!(codex.contains("wkp index"));
         assert!(codex.contains("wkp materialize --tier 0"));
         assert!(codex.contains("AGENTS.md") || codex.contains("## WKP memory"));
+        assert!(codex.contains("wkp context"));
     }
 
     /// Regression test for a real usability gap (William, 2026-09-17):

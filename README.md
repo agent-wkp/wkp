@@ -68,23 +68,33 @@ nothing else to set up. Two more modes build on top of it:
 wkp hooks --framework claude_code
 ```
 
-prints the `SessionStart` hook JSON. Merge it into
+prints JSON covering three hooks: `SessionStart` (materializes and
+injects tier 0), `UserPromptSubmit` (a best-effort BM25 search against
+each prompt, surfacing candidate paths when one clears a score
+threshold — `wkp prompt-hook`), and `PostToolUse` (re-runs `wkp index`
+after every `Write`/`Edit`, so the index never drifts stale behind an
+agent's own edits between session starts). Merge it into
 `.claude/settings.local.json` (or `.claude/settings.json` for a
 team-shared setting) under its `hooks` key — with `jq`, so any other
 settings and hooks already there are preserved, and re-running it is
-safe (won't add a duplicate entry):
+safe (won't add a duplicate entry under any of the three keys):
 
 ```bash
 mkdir -p .claude
 [ -s .claude/settings.local.json ] || echo '{}' > .claude/settings.local.json
 wkp hooks --framework claude_code | jq -s '
-    .[0].hooks.SessionStart = ((.[0].hooks.SessionStart // []) - .[1].hooks.SessionStart + .[1].hooks.SessionStart) | .[0]
+    .[1].hooks as $new
+    | reduce ($new | keys[]) as $k (.[0];
+        .hooks[$k] = ((.hooks[$k] // []) - $new[$k] + $new[$k])
+      )
   ' .claude/settings.local.json - > /tmp/wkp-settings-merge.json \
   && mv /tmp/wkp-settings-merge.json .claude/settings.local.json
 ```
 
 Tier 0 is now injected automatically before your first message, every
-session.
+session; relevant tier 2 search hits now surface automatically on each
+prompt too, and the index refreshes itself after every edit instead of
+only at the next session start.
 
 ### Codex, OpenCode, Hermes, and other AGENTS.md-reading harnesses
 

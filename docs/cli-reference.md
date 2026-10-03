@@ -78,12 +78,20 @@ the hits themselves.
 Walks `refs:`/`[[wikilink]]` edges outward from one specific file, no
 search query involved. `--depth` defaults to 2.
 
-### `wkp materialize --tier N [--path DIR]`
+### `wkp materialize --tier N [--routing-table] [--path DIR]`
 
 Writes `.wkp/tier{N}.md` atomically (temp file + rename). `--tier` is
 required — no default, deliberately, so a session-start hook never
 materializes "whatever tier" by accident. This is what a `SessionStart`
 hook reads for tier 0.
+
+`--routing-table` (`--tier 0` only — rejected on any other tier) splices
+a `<wkp-routing-table>` block into tier 0's own output: every tier-1
+item's title and path, no body content. Tier 1 specifically, never tier
+2 — using tier 2 would put unreviewed/`inbox/` content into a channel
+that's supposed to carry only human-signed items, the same guarantee
+tier 0's own content already relies on. If tier 1 is empty, the block
+says so honestly instead of being silently omitted.
 
 ### `wkp index [path] [--embed-url URL] [--embed-model NAME] [--embed-key-file PATH]`
 
@@ -197,11 +205,16 @@ ready-to-edit `systemd --user` unit.
 
 Prints text for a harness to apply — never writes a file itself.
 
-- **`claude_code`** — the exact `SessionStart` hook JSON. See the
+- **`claude_code`** — JSON covering three hooks at once: `SessionStart`
+  (unchanged — materializes and injects tier 0), `UserPromptSubmit`
+  (runs `wkp prompt-hook`, below), and `PostToolUse` (`matcher:
+  "Write|Edit"`, re-runs `wkp index` after every edit). See the
   [README](../README.md#claude-code) for the merge command.
 - **`codex`, `opencode`, `hermes`, `agents_md`** — all four print the
   identical plain-text `AGENTS.md` instruction (`wkp index && wkp
-  materialize --tier 0 && cat .wkp/tier0.md`). Codex and OpenCode are
+  materialize --tier 0 && cat .wkp/tier0.md`, plus a second line naming
+  `wkp context "<topic>"` as the manual fallback for these harnesses'
+  lack of a `UserPromptSubmit`-equivalent hook). Codex and OpenCode are
   confirmed `AGENTS.md` auto-readers. Hermes Agent is too, verified
   against its own source (`agent/prompt_builder.py`,
   `NousResearch/hermes-agent`) — but with one real caveat: Hermes loads
@@ -211,6 +224,27 @@ Prints text for a harness to apply — never writes a file itself.
   exactly like it reaches Codex/OpenCode *unless* the project also has
   its own `.hermes.md`/`HERMES.md`, which wins instead. `agents_md` is
   the generic name for any other AGENTS.md-reading harness.
+
+### `wkp prompt-hook`
+
+Claude Code `UserPromptSubmit` plumbing, registered by `wkp hooks
+--framework claude_code` above — not meant to be typed by hand. Reads
+the hook's JSON payload from stdin, runs a best-effort, any-term BM25
+search (`wkp-core`'s `search_any_term`, not plain `search`'s
+implicit-AND — a whole prompt needs partial-overlap matching, not a
+literal match on every word) against its `prompt` field, and prints up
+to 5 candidate paths when the top hits clear `WKP_PROMPT_HOOK_MIN_SCORE`
+(default `0.0` — any real match; BM25 scores are corpus-dependent and
+unbounded by orders of magnitude, so a fixed positive cutoff reliably
+swallows real hits in a small store — tune this up once a real
+golden-query set makes a better number knowable). Also reads
+`CLAUDE_PROJECT_DIR` (set by Claude Code for every hook invocation) in
+preference to its own working directory, so it finds the project-root
+index even when the triggering tool call touched a subdirectory.
+Always exits 0 and
+writes nothing — a missing index, a malformed payload, or nothing
+clearing the threshold all mean "print nothing," never a visible
+failure.
 
 ## Sandboxed execution
 

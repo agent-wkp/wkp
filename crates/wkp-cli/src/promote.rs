@@ -408,6 +408,7 @@ mod tests {
         crate::materialize::run_materialize(&crate::materialize::MaterializeOptions {
             path: dir.to_path_buf(),
             tier: 1,
+            routing_table: false,
         })
         .expect("materialize tier 1 before promote");
         let before = std::fs::read_to_string(dir.join(".wkp/tier1.md")).expect("read tier1.md");
@@ -437,6 +438,7 @@ mod tests {
         crate::materialize::run_materialize(&crate::materialize::MaterializeOptions {
             path: dir.to_path_buf(),
             tier: 1,
+            routing_table: false,
         })
         .expect("materialize tier 1 after promote");
         let after = std::fs::read_to_string(dir.join(".wkp/tier1.md")).expect("read tier1.md");

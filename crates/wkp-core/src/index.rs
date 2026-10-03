@@ -37,5 +37,8 @@ mod test_support;
 
 pub use hybrid::{hybrid_search, set_embedding, HybridSearchError};
 pub use schema::{IndexError, Item};
-pub use search::{context, materialize, search, search_trigram, traverse, SearchFilter, SearchHit};
+pub use search::{
+    context, materialize, routing_table, search, search_any_term, search_trigram, traverse,
+    SearchFilter, SearchHit,
+};
 pub use store::{build_in_memory, build_index, known_paths, open_index, update_index};
