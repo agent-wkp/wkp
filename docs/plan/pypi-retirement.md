@@ -13,8 +13,16 @@ record of that having happened, per the issue's own requirement).
   console script prints the retirement message to stderr and exits 2).
   Carries `Development Status :: 7 - Inactive`; long description and
   the printed message both point to GitHub Releases and the design
-  doc. This is the version an unpinned `pip install agent-wkp` now
-  resolves to.
+  doc. Superseded by `0.3.1` below -- see issue #245.
+- **`0.3.1`** (issue #245): `0.3.0` shipped the day before the
+  `williamcaban/agent-wkp` → `agent-wkp/wkp` org migration (2026-09-17)
+  and still carried the pre-migration URLs (Homepage, Repository,
+  Releases, design doc) -- PyPI pins a released file's metadata to its
+  version permanently, so the fix needed a new version rather than an
+  edit. Repo-side fix and local verification: PR #246. Confirmed live
+  on PyPI (`pypi.org/pypi/agent-wkp/0.3.1/json`): all four URLs now
+  point at `agent-wkp/wkp`. This is the version an unpinned `pip
+  install agent-wkp` now resolves to.
 
 ## What was yanked
 
@@ -25,10 +33,18 @@ record of that having happened, per the issue's own requirement).
 
 Yanking (not deleting) keeps both installable when explicitly pinned
 (`pip install agent-wkp==0.1.0`) while excluding them from any
-unpinned resolve, which now lands on `0.3.0`'s tombstone instead.
+unpinned resolve, which now lands on `0.3.1`'s tombstone instead.
 
-`0.3.0` itself is deliberately **not** yanked -- it is the intended
-default resolution target, not a release to steer people away from.
+## What was removed
+
+- **`0.3.0`** -- deleted (not yanked) by William, confirmed 2026-10-03;
+  no longer listed on PyPI at all (`releases` now shows only `0.1.0`,
+  `0.2.0`, `0.3.1`). Issue #245 itself had leaned toward not yanking
+  it (the release wasn't wrong in a way that broke anything, only its
+  URLs were stale) -- deletion is a deliberate step past that original
+  lean, a conscious call rather than the default the issue described,
+  made once `0.3.1` already existed as the correct replacement so
+  nothing was left unresolvable by deleting it.
 
 ## Why the name was kept, not deleted
 
@@ -48,11 +64,21 @@ channels, design 9.6).
 
 ## Verification
 
+As of 2026-10-03:
+
 ```
 $ curl -s https://pypi.org/pypi/agent-wkp/json | jq '.releases | to_entries[] | {version: .key, yanked: (.value[0].yanked // false)}'
 {"version": "0.1.0", "yanked": true}
 {"version": "0.2.0", "yanked": true}
-{"version": "0.3.0", "yanked": false}
+{"version": "0.3.1", "yanked": false}
+
+$ curl -s https://pypi.org/pypi/agent-wkp/0.3.1/json | jq '.info.project_urls'
+{
+  "Design doc": "https://github.com/agent-wkp/wkp/blob/main/docs/design/wkp-hub-design-v0.1.md",
+  "Homepage": "https://github.com/agent-wkp/wkp",
+  "Releases": "https://github.com/agent-wkp/wkp/releases",
+  "Repository": "https://github.com/agent-wkp/wkp"
+}
 ```
 
 ## Still open
