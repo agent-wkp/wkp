@@ -35,17 +35,16 @@ Yanking (not deleting) keeps both installable when explicitly pinned
 (`pip install agent-wkp==0.1.0`) while excluding them from any
 unpinned resolve, which now lands on `0.3.1`'s tombstone instead.
 
-**`0.3.0` is no longer listed on PyPI at all** -- confirmed via the
-JSON API (`releases` only shows `0.1.0`, `0.2.0`, `0.3.1`), as of
-2026-10-03. Issue #245 explicitly recommended *not* yanking `0.3.0`
-(it isn't wrong in a way that breaks anything, only its URLs were
-stale) -- a full removal is a stronger action than that recommendation
-covers, and isn't something this session's own tooling did. **Not yet
-confirmed with William why/how `0.3.0` disappeared** -- noted here
-rather than assumed, since PyPI's public API can't distinguish
-"deleted by the account holder" from any other explanation, and
-getting this wrong in a durable record would be worse than leaving it
-open.
+## What was removed
+
+- **`0.3.0`** -- deleted (not yanked) by William, confirmed 2026-10-03;
+  no longer listed on PyPI at all (`releases` now shows only `0.1.0`,
+  `0.2.0`, `0.3.1`). Issue #245 itself had leaned toward not yanking
+  it (the release wasn't wrong in a way that broke anything, only its
+  URLs were stale) -- deletion is a deliberate step past that original
+  lean, a conscious call rather than the default the issue described,
+  made once `0.3.1` already existed as the correct replacement so
+  nothing was left unresolvable by deleting it.
 
 ## Why the name was kept, not deleted
 
