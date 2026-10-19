@@ -49,7 +49,7 @@ jobs:
       # Required to upload SARIF results to the Security tab.
       security-events: write
       contents: read
-    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8ac9e5ce44cc7178e0e04229a91bdcc003166e57" # v2.5.1 at pin time, see note above
+    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a96bc4d2b09685b6142bcfe25a3dc17cb2d7347" # v2.5.1 at pin time, see note above
     with:
       scan-args: |-
         -r
